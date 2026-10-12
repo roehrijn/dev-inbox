@@ -1,0 +1,18 @@
+[
+  {
+    "id": "2001",
+    "reason": "subscribed",
+    "unread": false,
+    "updated_at": "2026-10-09T12:30:00Z",
+    "subject": {
+      "title": "bump deps",
+      "url": "https://api.github.com/repos/RoehriJN/Dev-Inbox/pulls/7",
+      "type": "PullRequest"
+    },
+    "repository": {
+      "name": "Dev-Inbox",
+      "full_name": "RoehriJN/Dev-Inbox",
+      "owner": { "login": "RoehriJN" }
+    }
+  }
+]

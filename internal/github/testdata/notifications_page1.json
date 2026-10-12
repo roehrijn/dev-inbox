@@ -1,0 +1,66 @@
+[
+  {
+    "id": "1001",
+    "reason": "review_requested",
+    "unread": true,
+    "updated_at": "2026-10-10T09:00:00Z",
+    "subject": {
+      "title": "add webhook",
+      "url": "https://api.github.com/repos/acme-co/frontend/pulls/42",
+      "type": "PullRequest"
+    },
+    "repository": {
+      "name": "frontend",
+      "full_name": "acme-co/frontend",
+      "owner": { "login": "acme-co" }
+    }
+  },
+  {
+    "id": "1002",
+    "reason": "mention",
+    "unread": false,
+    "updated_at": "2026-10-10T08:00:00Z",
+    "subject": {
+      "title": "flaky test",
+      "url": "https://api.github.com/repos/acme-co/frontend/issues/43",
+      "type": "Issue"
+    },
+    "repository": {
+      "name": "frontend",
+      "full_name": "acme-co/frontend",
+      "owner": { "login": "acme-co" }
+    }
+  },
+  {
+    "id": "1003",
+    "reason": "subscribed",
+    "unread": true,
+    "updated_at": "2026-10-10T07:00:00Z",
+    "subject": {
+      "title": "v1.0.0",
+      "url": "https://api.github.com/repos/acme-co/frontend/releases/1",
+      "type": "Release"
+    },
+    "repository": {
+      "name": "frontend",
+      "full_name": "acme-co/frontend",
+      "owner": { "login": "acme-co" }
+    }
+  },
+  {
+    "id": "1004",
+    "reason": "author",
+    "unread": true,
+    "updated_at": "2026-10-10T06:00:00Z",
+    "subject": {
+      "title": "pull request without url",
+      "url": null,
+      "type": "PullRequest"
+    },
+    "repository": {
+      "name": "frontend",
+      "full_name": "acme-co/frontend",
+      "owner": { "login": "acme-co" }
+    }
+  }
+]

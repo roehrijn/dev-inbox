@@ -1,0 +1,110 @@
+{
+  "data": {
+    "repository": {
+      "name": "Dev-Inbox",
+      "owner": { "login": "RoehriJN" },
+      "pullRequest": {
+        "state": "OPEN",
+        "isDraft": false,
+        "headRefOid": "abc123",
+        "updatedAt": "2026-10-10T12:00:00Z",
+        "mergeable": "CONFLICTING",
+        "mergeStateStatus": "DIRTY",
+        "reviewDecision": "CHANGES_REQUESTED",
+        "isInMergeQueue": false,
+        "rollupCommit": {
+          "nodes": [
+            {
+              "commit": {
+                "statusCheckRollup": {
+                  "state": "ERROR",
+                  "contexts": {
+                    "checkRunCountsByState": [
+                      { "state": "FAILURE", "count": 1 },
+                      { "state": "IN_PROGRESS", "count": 1 },
+                      { "state": "QUEUED", "count": 2 },
+                      { "state": "SUCCESS", "count": 3 },
+                      { "state": "SKIPPED", "count": 1 },
+                      { "state": "NOT_YET_INVENTED", "count": 4 }
+                    ],
+                    "statusContextCountsByState": [
+                      { "state": "ERROR", "count": 1 },
+                      { "state": "PENDING", "count": 1 },
+                      { "state": "SUCCESS", "count": 1 }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "id": "PR_kwDO1",
+        "title": "bump deps",
+        "url": "https://github.com/RoehriJN/Dev-Inbox/pull/7",
+        "author": { "__typename": "Bot", "login": "renovate" },
+        "baseRefName": "main",
+        "headRefName": "renovate/deps",
+        "labels": { "nodes": [{ "name": "dependencies" }, { "name": "ci" }] },
+        "assignees": { "nodes": [{ "login": "alice" }] },
+        "additions": 10,
+        "deletions": 3,
+        "changedFiles": 2,
+        "createdAt": "2026-10-01T08:00:00Z",
+        "headCommit": {
+          "nodes": [
+            {
+              "commit": {
+                "committedDate": "2026-10-09T07:00:00Z",
+                "statusCheckRollup": {
+                  "contexts": {
+                    "nodes": [
+                      { "__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": "https://ci/build" },
+                      { "__typename": "CheckRun", "name": "lint", "status": "IN_PROGRESS", "conclusion": null, "detailsUrl": "https://ci/lint" },
+                      { "__typename": "StatusContext", "context": "ci/jenkins", "state": "ERROR", "targetUrl": "https://jenkins/1" },
+                      { "__typename": "StatusContext", "context": "deploy", "state": "PENDING", "targetUrl": null }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "reviewRequests": {
+          "nodes": [
+            { "requestedReviewer": { "__typename": "User", "login": "bob" } },
+            { "requestedReviewer": { "__typename": "Team", "combinedSlug": "acme-co/control-plane" } },
+            { "requestedReviewer": { "__typename": "Bot", "login": "copilot-pull-request-reviewer" } },
+            { "requestedReviewer": null }
+          ]
+        },
+        "reviews": {
+          "nodes": [
+            { "id": "R2", "author": { "__typename": "User", "login": "alice" }, "state": "CHANGES_REQUESTED", "body": "Please pin the version.", "url": "https://github.com/RoehriJN/Dev-Inbox/pull/7#pullrequestreview-2", "submittedAt": "2026-10-09T10:00:00Z" },
+            { "id": "R1", "author": null, "state": "APPROVED", "body": "", "url": "https://github.com/RoehriJN/Dev-Inbox/pull/7#pullrequestreview-1", "submittedAt": "2026-10-09T09:00:00Z" },
+            { "id": "R3", "author": { "__typename": "User", "login": "roehrijn" }, "state": "PENDING", "body": "draft", "url": "https://github.com/RoehriJN/Dev-Inbox/pull/7#pullrequestreview-3", "submittedAt": null },
+            { "id": "R4", "author": { "__typename": "User", "login": "bob" }, "state": "COMMENTED", "body": "  \n", "url": "https://github.com/RoehriJN/Dev-Inbox/pull/7#pullrequestreview-4", "submittedAt": "2026-10-09T10:30:00Z" }
+          ]
+        },
+        "comments": {
+          "nodes": [
+            { "id": "IC1", "author": { "__typename": "User", "login": "alice" }, "body": "Why now?", "url": "https://github.com/RoehriJN/Dev-Inbox/pull/7#issuecomment-1", "createdAt": "2026-10-09T08:00:00Z" },
+            { "id": "IC2", "author": { "__typename": "Bot", "login": "github-actions" }, "body": "Coverage report", "url": "https://github.com/RoehriJN/Dev-Inbox/pull/7#issuecomment-2", "createdAt": "2026-10-09T11:00:00Z" }
+          ]
+        },
+        "reviewThreads": {
+          "nodes": [
+            {
+              "comments": {
+                "nodes": [
+                  { "id": "RC1", "author": { "__typename": "User", "login": "alice" }, "body": "Pin this.", "url": "https://github.com/RoehriJN/Dev-Inbox/pull/7#discussion_r1", "createdAt": "2026-10-09T09:30:00Z", "path": "go.mod", "line": 12, "originalLine": 10, "state": "SUBMITTED", "replyTo": null },
+                  { "id": "RC2", "author": { "__typename": "User", "login": "bob" }, "body": "Agreed.", "url": "https://github.com/RoehriJN/Dev-Inbox/pull/7#discussion_r2", "createdAt": "2026-10-09T09:45:00Z", "path": "go.mod", "line": null, "originalLine": 7, "state": "SUBMITTED", "replyTo": { "id": "RC1" } },
+                  { "id": "RC3", "author": { "__typename": "User", "login": "roehrijn" }, "body": "unsent", "url": "https://github.com/RoehriJN/Dev-Inbox/pull/7#discussion_r3", "createdAt": "2026-10-09T09:50:00Z", "path": "go.mod", "line": 12, "originalLine": 10, "state": "PENDING", "replyTo": { "id": "RC1" } }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "data": {
+    "organization": {
+      "team": {
+        "members": {
+          "nodes": [{"login": "bob"}, {"login": "carol"}],
+          "pageInfo": {"hasNextPage": false, "endCursor": "Y3Vyc29yOjQ="}
+        }
+      }
+    }
+  }
+}
