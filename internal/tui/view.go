@@ -116,7 +116,11 @@ func (a *app) ensureVisible() {
 }
 
 func (a *app) View() tea.View {
-	v := tea.NewView(a.render())
+	content := a.render()
+	if a.picker != nil && content != "" {
+		content = a.overlay(content, a.renderPicker())
+	}
+	v := tea.NewView(content)
 	v.AltScreen = true
 	v.WindowTitle = "dev-inbox"
 	return v

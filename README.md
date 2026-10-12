@@ -14,14 +14,15 @@ to the same events or call the same API. GitHub state is never modified.
 ## Install
 
 ```sh
-nix build                                       # ./result/bin/dev-inbox and ./result/bin/dev-inbox-jev
-nix run . -- serve                              # run without installing
-go install ./cmd/dev-inbox ./cmd/dev-inbox-jev  # to $(go env GOBIN)
-just build                                      # ./bin/dev-inbox and ./bin/dev-inbox-jev
+nix build                  # ./result/bin/dev-inbox, dev-inbox-jev and dev-inbox-linear
+nix run . -- serve         # run without installing
+go install ./cmd/...       # to $(go env GOBIN)
+just build                 # ./bin/dev-inbox, dev-inbox-jev and dev-inbox-linear
 ```
 
 `nix build` sees only files tracked by git; use `nix build 'path:.'` to include uncommitted changes. The
-binaries are static (no cgo; SQLite is pure Go). `dev-inbox-jev` is the optional [Jev plugin](#jev-plugin).
+binaries are static (no cgo; SQLite is pure Go). `dev-inbox-jev` and `dev-inbox-linear` are the optional
+[Jev plugin](#jev-plugin) and [Linear plugin](#linear-plugin).
 
 ## Quick start
 
@@ -62,10 +63,11 @@ binaries are static (no cgo; SQLite is pure Go). `dev-inbox-jev` is the optional
    dev-inbox
    ```
 
-5. Optionally start the Jev plugin next to the daemon:
+5. Optionally start the Jev and Linear plugins next to the daemon:
 
    ```sh
    TYPESAFE_API_KEY=... dev-inbox-jev
+   LINEAR_API_KEY=... dev-inbox-linear
    ```
 
 The daemon, the TUI and the plugin find each other on `nats://127.0.0.1:14222`; start them in any order. The TUI and
@@ -111,21 +113,40 @@ RestartSec=10
 WantedBy=default.target
 ```
 
+and `~/.config/systemd/user/dev-inbox-linear.service` likewise
+(`~/.config/dev-inbox/linear.env` containing `LINEAR_API_KEY=...`, mode 0600):
+
+```ini
+[Unit]
+Description=dev-inbox Linear plugin
+After=dev-inbox.service
+Wants=dev-inbox.service
+
+[Service]
+ExecStart=%h/go/bin/dev-inbox-linear
+EnvironmentFile=%h/.config/dev-inbox/linear.env
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
 ```sh
 systemctl --user daemon-reload
-systemctl --user enable --now dev-inbox dev-inbox-jev
+systemctl --user enable --now dev-inbox dev-inbox-jev dev-inbox-linear
 journalctl --user -u dev-inbox -f
 ```
 
 The daemon takes the token from `GH_TOKEN` or `GITHUB_TOKEN`, then from `~/.config/gh/hosts.yml`, and otherwise
 runs `gh auth token`. That last case, the default when `gh` stores the token in the system keyring, needs `gh` on
 the service's `PATH` or its path in `GH_PATH`; a user service usually has neither, so set `GH_PATH` (find it with
-`command -v gh`). Adjust `ExecStart` to where the binaries are, e.g. a Nix profile. The plugin logs
+`command -v gh`). Adjust `ExecStart` to where the binaries are, e.g. a Nix profile. The Jev plugin logs
 private PR content (see [Jev plugin](#jev-plugin)), and so does the journal then.
 
 ### Upgrading
 
-Rebuild, then restart the daemon, the plugin and every open TUI; running processes keep the old binary.
+Rebuild, then restart the daemon, the plugins and every open TUI; running processes keep the old binary.
 Stored PRs gain new fields on their next full fetch from GitHub. If they look incomplete or wrong after an upgrade,
 stop the daemon and delete the state directory (default `~/.local/state/dev-inbox`); the next start imports
 everything again. That loses annotations, such as hidden PRs and plugin results, and the event history.
@@ -242,17 +263,8 @@ one, and no direct request to you applies: it is not a draft, was updated within
 checks and no merge conflict, and its author is neither a bot nor greylisted. Any review by someone who is not a bot,
 not greylisted and not the author ends the wait. Pending checks are fine.
 
-#### Plugins
-
-The top-level `plugins` key is reserved for external plugins. The core ignores it: nothing below `plugins` is
-checked, so a plugin can define whatever keys it needs, for example `plugins.jev`. Unknown keys outside `plugins`
-are still errors.
-
-```yaml
-plugins:
-  jev:
-    threshold: 0.6
-```
+The plugins do not read this file; each has its own, see [Jev plugin](#jev-plugin) and
+[Linear plugin](#linear-plugin).
 
 ## TUI keys
 
@@ -260,7 +272,8 @@ plugins:
 |---|---|
 | `j` / `k`, arrows | Move down / up |
 | `g` / `G` | Jump to top / bottom |
-| `enter` / `o` | Open the PR in the browser (expands a collapsed section header) |
+| `o` | Open the PR in the browser (expands a collapsed section header) |
+| `O` | Open linked issue (picker when several) |
 | `y` | Copy the PR URL |
 | `x` | Hide the PR until something new happens in it, or unhide it |
 | `tab` / `shift+tab` | Next / previous tab (wraps around) |
@@ -289,7 +302,7 @@ The detail pane (`d`) lists how the score adds up, one line per term, e.g. `team
 Row symbols before the title: `★` review requested from you personally, `✓` / `✗` / `●` checks passed / failing /
 running, `◌` draft.
 
-The status bar lists every NATS micro service that answers a `$SRV.PING`, such as a plugin, e.g. `devinbox-jev ●`.
+The status bar lists every NATS micro service that answers a `$SRV.PING`, such as a plugin, e.g. `devinbox-jev ●` or `devinbox-linear ●`.
 
 ## Event stream
 
@@ -349,8 +362,19 @@ Request/reply with JSON bodies. Failures reply with `{"error": "..."}`.
 nats --server nats://127.0.0.1:14222 request devinbox.api.inbox.list '{}'
 ```
 
-Annotation values shaped like `{"badge": "due in 2d", "level": "warn"}` render as a badge in the TUI. See
-[docs/design.md](docs/design.md) for the architecture and [docs/ideas.md](docs/ideas.md) for workflow ideas.
+Annotation values shaped like `{"badge": "due in 2d", "level": "warn"}` render as a badge in the TUI.
+
+A PR-level annotation whose JSON object value has a `links` array renders as a section in the detail pane, and its
+links open with `O` (a popup lets you choose when several are linked). Each link is
+`{"id", "title", "url", "detail"}`, and the optional `label` (default `Links`) is the section heading:
+
+```json
+{"label": "Design docs", "links": [{"id": "ACME-7", "title": "Retry policy", "url": "https://acme.example/docs/7", "detail": "draft"}]}
+```
+
+Links do not affect the score unless the value also carries a `score` or `attention` field.
+
+See [docs/design.md](docs/design.md) for the architecture and [docs/ideas.md](docs/ideas.md) for workflow ideas.
 
 ## Jev plugin
 
@@ -362,7 +386,7 @@ go install ./cmd/dev-inbox-jev
 TYPESAFE_API_KEY=... dev-inbox-jev
 ```
 
-The API key is read from `TYPESAFE_API_KEY` only, never from the config file. The plugin looks at comments by
+The API key is read from `TYPESAFE_API_KEY` only, never from a settings file. The plugin looks at comments by
 someone else, not a bot, that you have not handled and that are in a review thread you started or joined, mention
 you, or are top-level on a PR you are directly requested to review or have reviewed. You handle a comment by
 reacting to it with 👍, ❤️, 🎉 or 🚀, by replying later in the same review thread (a top-level comment: by a later
@@ -375,24 +399,27 @@ nothing while the core already reports `changes since your review`. Handling a c
 result, while its `jev.intent` annotation stays. Everything the plugin added expires as soon as you act on the PR
 and is written again right away if comments you have not handled remain.
 
-Flags: `--config` (same default file as dev-inbox), `--nats-url`, `--log-level`. Settings live under
-`plugins.jev`; unknown keys there are errors:
+Flags: `--config`, `--nats-url`, `--log-level`. The plugin reads its settings from its own file,
+`$XDG_CONFIG_HOME/dev-inbox/jev.yaml` (default `~/.config/dev-inbox/jev.yaml`), or from the path given with
+`--config`. It never reads the core's `config.yaml`. The settings are top-level keys, and unknown keys are errors:
 
 ```yaml
-plugins:
-  jev:
-    threshold: 0.6           # below this probability a comment is "unclear" and adds nothing
-    weights:                 # points per intent, each counted once per PR; 0 disables an intent
-      question-for-me: 40
-      pushback: 30
-      rereview-request: 30
-      addressed: 0
-      ack: 0
-      not-for-me: 0
-    repos: [acme, other/web] # orgs or org/repos sent to Jev; absent or empty sends all
-    debounce: 2s             # quiet time after an event before a PR is evaluated
-    # nats-url and log-level work like the flags; nats-url falls back to tui.nats-url
+nats-url: nats://127.0.0.1:14222  # NATS URL of the daemon
+log-level: info
+threshold: 0.6           # below this probability a comment is "unclear" and adds nothing
+weights:                 # points per intent, each counted once per PR; 0 disables an intent
+  question-for-me: 40
+  pushback: 30
+  rereview-request: 30
+  addressed: 0
+  ack: 0
+  not-for-me: 0
+repos: [acme, other/web] # orgs or org/repos sent to Jev; absent or empty sends all
+debounce: 2s             # quiet time after an event before a PR is evaluated
 ```
+
+A flag given on the command line wins over the file. `nats-url` falls back to `nats://127.0.0.1:14222`; if the
+daemon listens elsewhere, set it here or with `--nats-url`.
 
 Comment bodies and PR titles, including those of private repositories, are sent to TypeSafe AI; `repos` limits
 what leaves the machine. Every Jev request and response, bodies included and the API key never, is logged as a
@@ -402,10 +429,80 @@ and events whose evaluation fails, for example while Jev is rate limited, are re
 evaluated again on every event that can change which comments are unhandled, including `pr.updated`, which the core
 emits when your reactions change, but never on `pr.annotated`, so the plugin does not trigger itself.
 
+## Linear plugin
+
+`dev-inbox-linear` is an optional plugin that annotates PRs whose Linear issues are due soon. It runs next to
+`dev-inbox serve` and uses only the NATS API above:
+
+```sh
+go install ./cmd/dev-inbox-linear
+LINEAR_API_KEY=... dev-inbox-linear
+```
+
+The API key is a Linear personal API key, read from `LINEAR_API_KEY` only, never from a settings file, and never
+logged. Without it the plugin exits with a usage error.
+
+A PR is linked to Linear issues in three ways, and the results are merged:
+
+- Linear's GitHub attachment for the PR URL. Linear creates it when the PR body contains `Closes ABC-123` or a
+  similar magic word, or when the issue's branch is pushed.
+- The issue whose branch name matches the PR's head ref.
+- Identifiers like `ABC-123` in the PR title or the branch name.
+
+Three dates count, and the earliest wins:
+
+- the due date of each linked issue that is still open (not completed or canceled),
+- the target date of the project milestone of such an issue,
+- the target date of the issue's project, unless the project is completed or canceled.
+
+A PR is urgent when the earliest date is within `horizon-days` or already past. The level is `crit` when the date is
+today or overdue, `warn` within 2 days and `info` otherwise. An urgent PR gets the PR annotation `linear.urgency`,
+for example:
+
+```json
+{"badge": "due in 2d", "level": "warn", "dueDate": "2026-05-14", "reason": "project Checkout v2", "issues": ["ACME-123"]}
+```
+
+`badge` and `level` are what the TUI shows; `reason` says which date counted and `issues` lists the linked issues.
+The mere presence of the annotation adds the core's `urgent` score weight (+20), so the plugin deletes it as soon
+as the PR is no longer urgent, for example after the due date moves or the issue is completed.
+
+Every PR with linked issues also gets the PR annotation `linear.issues`, which lists all of them, completed and
+canceled ones included, sorted by identifier:
+
+```json
+{"label": "Linear issues", "links": [{"id": "ACME-123", "title": "Fix login", "url": "https://linear.app/acme/issue/ACME-123/fix-login", "detail": "In Progress · due 2026-05-14 · project Checkout v2"}]}
+```
+
+`detail` joins the workflow state, `due <date>`, `milestone <name>` and `project <name>` of the issue, leaving out
+what is not set. The annotation has no `score`, `attention` or `badge` field, so it never changes the score or the
+ranking. The TUI shows the issues in the details, and `O` opens one in the browser, with a popup to choose when several
+are linked. The plugin deletes `linear.issues` when the PR no longer links to any issue.
+
+A PR is evaluated on `pr.discovered`, `pr.reopened` and `pr.updated` when its title or branch changed, and all open
+PRs are evaluated at start and then every `sweep-interval`, since due dates change in Linear without any GitHub
+event. Flags: `--config`, `--nats-url`, `--log-level`. The plugin reads its settings from its own file,
+`$XDG_CONFIG_HOME/dev-inbox/linear.yaml` (default `~/.config/dev-inbox/linear.yaml`), or from the path given with
+`--config`. It never reads the core's `config.yaml`. The settings are top-level keys, and unknown keys are errors:
+
+```yaml
+nats-url: nats://127.0.0.1:14222  # NATS URL of the daemon
+log-level: info
+horizon-days: 7     # days ahead a due date makes a PR urgent; 0 flags only overdue and due-today PRs
+sweep-interval: 1h  # Go duration, greater than 0
+```
+
+A flag given on the command line wins over the file. `nats-url` falls back to `nats://127.0.0.1:14222`; if the
+daemon listens elsewhere, set it here or with `--nats-url`.
+
+Only the PR URL, title and branch name are sent to Linear, and the plugin only reads from Linear. The plugin
+registers the NATS micro service `devinbox-linear`, which the TUI status bar shows while it runs. Its durable
+JetStream consumer `linear` catches up on missed events after a restart.
+
 ## Development
 
 ```sh
-just build   # bin/dev-inbox
+just build   # bin/dev-inbox, bin/dev-inbox-jev and bin/dev-inbox-linear
 just test
 just lint
 just fmt

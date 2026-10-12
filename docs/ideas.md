@@ -3,15 +3,6 @@
 Open ideas, not implemented. Each fits the event stream and annotation API described in
 [design.md](design.md).
 
-## Linear urgency enrichment
-
-Link PRs to Linear issues (branch name such as `devops-123/...`, `Closes DEVOPS-123` in title or body,
-Linear's GitHub attachment). Fetch the due dates of the issues' projects and annotate
-`linear.urgency` with a badge, e.g. `{"badge": "due in 2d", "level": "warn", "dueDate": "..."}`.
-The mere presence of `linear.urgency` adds 20 to the priority score, so set it only for urgent PRs
-and delete it (null value) once a PR stops being urgent.
-Trigger: `pr.discovered`, `pr.updated`; plus a daily sweep since due dates change outside GitHub.
-
 ## Comment intent via TypeSafe Jev
 
 Classify PR comments (`pr.comment_added`) and comments of linked Linear issues with Jev typed

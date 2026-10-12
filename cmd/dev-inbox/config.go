@@ -17,9 +17,6 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// pluginsKey is the top-level key of the plugin namespace, which checkKeys leaves alone.
-const pluginsKey = "plugins"
-
 // section is a command whose flags are also settable under the key of the same name in the config file.
 // The flags double as the schema of the section: their names are its keys and their defaults its defaults.
 type section struct {
@@ -61,8 +58,6 @@ type settings struct {
 	TUI struct {
 		NATSURL string `mapstructure:"nats-url"`
 	} `mapstructure:"tui"`
-	// Plugins exists so that UnmarshalExact accepts the namespace; the core never reads or validates it.
-	Plugins map[string]any `mapstructure:"plugins"`
 }
 
 // loadSettings resolves the settings of sec for cmd: flags set on the command line, then the config file,
@@ -119,8 +114,7 @@ func readConfigFile(cmd *cobra.Command) (v *viper.Viper, path string, err error)
 var replacedTeamKeys = []string{"serve.preferred-team", "serve.score.preferred-team"}
 
 // checkKeys rejects keys of v that no section defines, which catches typos that would otherwise be ignored.
-// Everything below the plugins key belongs to the plugins, and the keys below serve.preferred-teams are team
-// names; neither is checked.
+// The keys below serve.preferred-teams are team names and are not checked.
 func checkKeys(v *viper.Viper, path string) error {
 	known := make(map[string]bool)
 	for _, sec := range sections {
@@ -138,7 +132,7 @@ func checkKeys(v *viper.Viper, path string) error {
 	keys := v.AllKeys()
 	slices.Sort(keys)
 	for _, key := range keys {
-		if known[key] || key == pluginsKey || strings.HasPrefix(key, pluginsKey+".") || strings.HasPrefix(key, teamsPrefix) {
+		if known[key] || strings.HasPrefix(key, teamsPrefix) {
 			continue
 		}
 		if slices.Contains(replacedTeamKeys, key) {

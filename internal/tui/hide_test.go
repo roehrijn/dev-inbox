@@ -143,7 +143,7 @@ func TestHiddenSectionsCollapsedByDefault(t *testing.T) {
 	if got := selectedKey(t, a); got != "header:"+string(sectionHiddenOthers) {
 		t.Fatalf("h selected %s, want the folded hidden section", got)
 	}
-	press(t, a, "enter", "1")
+	press(t, a, "o", "1")
 	assertContains(t, screen(a), "▾ Hidden until new activity 2", "PR 2")
 	if a.collapsed[sectionHiddenMine] || a.collapsed[sectionHiddenOthers] {
 		t.Errorf("unfolded hidden sections folded again: %v", a.collapsed)
@@ -512,8 +512,8 @@ func TestHideKeyInHelp(t *testing.T) {
 			}
 		}
 	}
-	if len(group) < 3 || !slices.Equal(group[:3], []string{"enter/o", "y", "x"}) {
-		t.Errorf("full help column %v, want hide right after open and copy", group)
+	if len(group) < 4 || !slices.Equal(group[:4], []string{"o", "O", "y", "x"}) {
+		t.Errorf("full help column %v, want hide right after open, open link and copy", group)
 	}
 
 	a, _ := loadedApp(t, fixtureList(), 120, 30)

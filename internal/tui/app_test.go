@@ -234,9 +234,9 @@ func TestCollapseAndExpand(t *testing.T) {
 	if got := selectedKey(t, a); got != "header:needs_action" {
 		t.Fatalf("h on header: %s", got)
 	}
-	press(t, a, "enter")
+	press(t, a, "o")
 	if a.collapsed[model.SectionNeedsAction] || selectedKey(t, a) != "roehrijn/dev-inbox#3" {
-		t.Fatalf("enter on header should expand, got %s", selectedKey(t, a))
+		t.Fatalf("o on header should expand, got %s", selectedKey(t, a))
 	}
 	press(t, a, "l") // no-op on a row
 	if got := selectedKey(t, a); got != "roehrijn/dev-inbox#3" {
@@ -485,7 +485,8 @@ func TestOpenAndCopy(t *testing.T) {
 	drain(t, a, update(t, a, keyPress("enter")))
 	drain(t, a, update(t, a, keyPress("o")))
 	want := "https://github.com/roehrijn/dev-inbox/pull/3"
-	if !slices.Equal(opened, []string{want, want}) {
+	// enter is not bound, so only o opens.
+	if !slices.Equal(opened, []string{want}) {
 		t.Fatalf("opened %v", opened)
 	}
 

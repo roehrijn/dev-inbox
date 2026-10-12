@@ -18,6 +18,7 @@ import (
 	"github.com/roehrijn/dev-inbox/internal/api"
 	"github.com/roehrijn/dev-inbox/internal/jev"
 	"github.com/roehrijn/dev-inbox/internal/jevplugin"
+	"github.com/roehrijn/dev-inbox/internal/pluginkit"
 )
 
 // usageError reports invalid arguments, flags or configuration. It makes the process exit with status 2.
@@ -71,7 +72,8 @@ func newRootCmd(r runFunc, getenv func(string) string) *cobra.Command {
 		Short: "Classify comments on others' PRs with TypeSafe Jev",
 		Long: "dev-inbox-jev classifies new comments on others' PRs with TypeSafe Jev and annotates the PRs that need " +
 			"you, through the NATS API of dev-inbox serve.\n\n" +
-			"Settings come from flags, then the plugins.jev section of the config file, then built-in defaults. " +
+			"Settings come from flags, then the config file jev.yaml in the directory of the dev-inbox config file, " +
+			"then built-in defaults. " +
 			"The API key is read from " + jev.APIKeyEnv + " only.",
 		Args: func(_ *cobra.Command, args []string) error {
 			if len(args) > 0 {
@@ -93,9 +95,10 @@ func newRootCmd(r runFunc, getenv func(string) string) *cobra.Command {
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return usageError{err} })
 	fs := cmd.Flags()
 	fs.SortFlags = false
-	fs.String("config", defaultConfigPath(), "Path of the YAML config file; unlike the default, a file given here must exist")
+	fs.String("config", pluginkit.ConfigPath("jev"),
+		"Path of the YAML config file; unlike the default, a file given here must exist")
 	fs.String("nats-url", api.DefaultNATSURL,
-		"NATS URL of the daemon; the config file's plugins.jev.nats-url, then tui.nats-url, replace the default")
+		"NATS URL of the daemon; the config file's nats-url replaces the default")
 	fs.String("log-level", "info", "Log level: debug, info, warn or error")
 	return cmd
 }

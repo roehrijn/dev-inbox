@@ -426,60 +426,17 @@ func TestInvalidDefaultFileIsAnError(t *testing.T) {
 	}
 }
 
-func TestPluginsNamespace(t *testing.T) {
-	const plugins = "plugins:\n  jev:\n    repos: [acme-co/frontend]\n    threshold: 0.6\n    nested: {a: [1, x]}\n" +
-		"  other: 5\n"
-	t.Run("is ignored by both commands", func(t *testing.T) {
+func TestPluginsKeyIsRejected(t *testing.T) {
+	for _, file := range []string{
+		"plugins:\n  jev:\n    threshold: 0.6\n",
+		"plugins: 5\n",
+	} {
 		setupEnv(t)
-		path := writeConfig(t, plugins+"serve:\n  nats-port: 4222\ntui:\n  nats-url: nats://file:1\n")
-		serve := runCLI(t, "serve", "--config", path)
-		want := defaultServeConfig()
-		want.NATSPort = 4222
-		if serve.err != nil || !sameConfig(*serve.serve, want) {
-			t.Errorf("serve config = %+v, err = %v; want %+v", serve.serve, serve.err, want)
+		res := runCLI(t, "serve", "--config", writeConfig(t, file))
+		if !isUsage(res.err) || !strings.Contains(res.err.Error(), `unknown key "plugins`) || res.serve != nil {
+			t.Errorf("config %q: err = %v, want a usage error naming plugins", file, res.err)
 		}
-		tui := runCLI(t, "--config", path)
-		if tui.err != nil || *tui.tuiURL != "nats://file:1" {
-			t.Errorf("tui url = %v, err = %v; want nats://file:1", tui.tuiURL, tui.err)
-		}
-	})
-	t.Run("content is not validated", func(t *testing.T) {
-		for _, file := range []string{
-			"plugins:\n",
-			"plugins: {}\n",
-			"plugins:\n  jev: loud\n",
-			"plugins:\n  jev: [1, 2]\n",
-			"plugins:\n  jev:\n    nats-prot: 1\n    score: {urgnt: 1}\n",
-		} {
-			setupEnv(t)
-			if res := runCLI(t, "serve", "--config", writeConfig(t, file)); res.err != nil {
-				t.Errorf("config %q: err = %v", file, res.err)
-			}
-		}
-	})
-	t.Run("does not excuse unknown keys elsewhere", func(t *testing.T) {
-		for _, tt := range []struct{ file, key string }{
-			{plugins + "serve:\n  nats-prot: 1\n", "serve.nats-prot"},
-			{plugins + "tui:\n  nats-urls: x\n", "tui.nats-urls"},
-			{plugins + "serve:\n  plugins:\n    jev: 1\n", "serve.plugins.jev"},
-			{plugins + "pluginsx: 1\n", "pluginsx"},
-			{plugins + "plugin:\n  jev: 1\n", "plugin.jev"},
-		} {
-			setupEnv(t)
-			res := runCLI(t, "serve", "--config", writeConfig(t, tt.file))
-			if !isUsage(res.err) || !strings.Contains(res.err.Error(), `unknown key "`+tt.key+`"`) || res.serve != nil {
-				t.Errorf("config %q: err = %v, want a usage error naming %s", tt.file, res.err, tt.key)
-			}
-		}
-	})
-	t.Run("must be a mapping", func(t *testing.T) {
-		for _, file := range []string{"plugins: 5\n", "plugins: [jev]\n"} {
-			setupEnv(t)
-			if res := runCLI(t, "serve", "--config", writeConfig(t, file)); !isUsage(res.err) {
-				t.Errorf("config %q: err = %v, want a usage error", file, res.err)
-			}
-		}
-	})
+	}
 }
 
 func TestStateDirHomeExpansion(t *testing.T) {
