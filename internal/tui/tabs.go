@@ -20,14 +20,26 @@ var tabDefs = [...]tabDef{
 	tabOthers: {title: "Others' PRs", short: "Others", empty: "Nothing to review. All caught up."},
 }
 
+// The hidden sections are TUI-local: each tab lists the PRs the viewer hid until something new
+// happens in them (model.Classification.Hidden) in its own section, after all others.
+const (
+	sectionHiddenMine   model.Section = "hidden_mine"
+	sectionHiddenOthers model.Section = "hidden_others"
+)
+
+// hiddenSections holds the hidden section of each tab.
+var hiddenSections = [len(tabDefs)]model.Section{tabMine: sectionHiddenMine, tabOthers: sectionHiddenOthers}
+
 // sectionTab fixes the tab each section is listed on.
 var sectionTab = map[model.Section]int{
 	model.SectionNeedsAction:      tabMine,
 	model.SectionReadyToMerge:     tabMine,
 	model.SectionDrafts:           tabMine,
 	model.SectionWaitingForReview: tabMine,
+	sectionHiddenMine:             tabMine,
 	model.SectionReviewRequested:  tabOthers,
 	model.SectionInvolved:         tabOthers,
+	sectionHiddenOthers:           tabOthers,
 }
 
 // tabState is the view state a tab keeps while another tab is active.
@@ -37,27 +49,39 @@ type tabState struct {
 
 func (a *app) cur() *tabState { return &a.tabs[a.tab] }
 
+// viewName names the view of the Others' PRs tab, see hiddenFromList.
+func (a *app) viewName() string {
+	if a.showAll {
+		return "all"
+	}
+	return "needs me"
+}
+
 // selectTab activates tab ti, wrapping around at both ends.
 func (a *app) selectTab(ti int) {
 	n := len(tabDefs)
 	a.tab = (ti%n + n) % n
 }
 
-// tabSections returns the indices into a.sections of the sections listed on tab ti.
+// tabSections returns the indices into a.sections of the sections listed on tab ti. The
+// hidden section is listed only while it holds PRs.
 func (a *app) tabSections(ti int) []int {
 	var idx []int
 	for i, s := range a.sections {
-		if sectionTab[s.id] == ti {
+		if sectionTab[s.id] == ti && (s.id != hiddenSections[ti] || len(s.items) > 0) {
 			idx = append(idx, i)
 		}
 	}
 	return idx
 }
 
+// tabCount counts the PRs listed on tab ti, except those in its hidden section.
 func (a *app) tabCount(ti int) int {
 	n := 0
 	for _, si := range a.tabSections(ti) {
-		n += len(a.sections[si].items)
+		if s := a.sections[si]; s.id != hiddenSections[ti] {
+			n += len(s.items)
+		}
 	}
 	return n
 }

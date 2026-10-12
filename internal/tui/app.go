@@ -3,6 +3,7 @@ package tui
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/url"
@@ -19,6 +20,7 @@ import (
 	"charm.land/glamour/v2"
 
 	"github.com/roehrijn/dev-inbox/internal/api"
+	"github.com/roehrijn/dev-inbox/internal/derive"
 	"github.com/roehrijn/dev-inbox/internal/model"
 )
 
@@ -35,7 +37,12 @@ var sectionTitles = map[model.Section]string{
 	model.SectionDrafts:           "Your drafts",
 	model.SectionWaitingForReview: "Waiting for review",
 	model.SectionInvolved:         "Involved",
+	sectionHiddenMine:             "Hidden until new activity",
+	sectionHiddenOthers:           "Hidden until new activity",
 }
+
+// displaySections lists all sections in display order: model.Sections, then the hidden sections.
+var displaySections = append(slices.Clone(model.Sections), hiddenSections[:]...)
 
 type (
 	connMsg struct{ connected bool }
@@ -48,6 +55,11 @@ type (
 		text string
 		err  bool
 	}
+	// hiddenMsg reports the outcome of hiding or unhiding a PR.
+	hiddenMsg struct {
+		text   string
+		failed bool
+	}
 	listMsg struct {
 		seq  int
 		resp api.ListResponse
@@ -59,6 +71,8 @@ type (
 		item *api.InboxItem
 		err  error
 	}
+	// pluginsMsg carries the names of the services that answered the latest ping.
+	pluginsMsg struct{ names []string }
 )
 
 type section struct {
@@ -116,11 +130,16 @@ type app struct {
 	appliedSeq    int
 	relistPending bool
 
-	viewer    model.Viewer
+	viewer model.Viewer
+	// items is the latest list, kept to regroup it when the view changes.
+	items     []api.InboxItem
 	sections  []section
 	collapsed map[model.Section]bool
 	tab       int
 	tabs      [len(tabDefs)]tabState
+	// showAll selects the "all" view of the Others' PRs tab instead of "needs me".
+	showAll bool
+	plugins []string
 
 	showDetail  bool
 	viewport    viewport.Model
@@ -150,7 +169,7 @@ func newApp(ctx context.Context, be backend, natsURL string) *app {
 		retry:      retryDelay,
 		keys:       newKeyMap(),
 		help:       help.New(),
-		collapsed:  map[model.Section]bool{},
+		collapsed:  map[model.Section]bool{sectionHiddenMine: true, sectionHiddenOthers: true},
 		viewport:   viewport.New(),
 		details:    map[model.PRKey]*api.InboxItem{},
 		detailErrs: map[model.PRKey]error{},
@@ -159,7 +178,7 @@ func newApp(ctx context.Context, be backend, natsURL string) *app {
 		markdown:   map[markdownKey]string{},
 	}
 	a.viewport.FillHeight = true
-	for _, id := range model.Sections {
+	for _, id := range displaySections {
 		a.sections = append(a.sections, section{id: id})
 	}
 	a.setDark(true)
@@ -185,7 +204,9 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.connected {
 			// Events may have been missed while disconnected.
 			a.forgetDetails(nil)
-			cmds = append(cmds, a.relist())
+			cmds = append(cmds, a.relist(), a.pingPlugins())
+		} else {
+			a.plugins = nil
 		}
 	case eventMsg:
 		cmds = append(cmds, a.handleEvent(msg.key))
@@ -205,13 +226,21 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.rev++
 	case flashMsg:
 		cmds = append(cmds, a.setFlash(msg.text, msg.err))
+	case hiddenMsg:
+		cmds = append(cmds, a.setFlash(msg.text, msg.failed))
+		if msg.failed {
+			// Undoes the optimistic move of the row.
+			cmds = append(cmds, a.relist())
+		}
 	case clearFlashMsg:
 		if msg.seq == a.flashSeq {
 			a.flash = ""
 		}
+	case pluginsMsg:
+		a.plugins = msg.names
 	case tickMsg:
 		a.rev++
-		cmds = append(cmds, minuteTick())
+		cmds = append(cmds, minuteTick(), a.pingPlugins())
 	}
 	a.move(0)
 	a.ensureVisible()
@@ -264,6 +293,11 @@ func (a *app) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		a.selectTab(a.tab - 1)
 	case key.Matches(msg, k.JumpTab):
 		a.selectTab(int(msg.String()[0] - '1'))
+	case key.Matches(msg, k.ToggleAll):
+		if a.tab == tabOthers {
+			a.showAll = !a.showAll
+			a.regroup()
+		}
 	case key.Matches(msg, k.Toggle):
 		if hasSel {
 			a.setCollapsed(sel.sec, sel.row >= 0)
@@ -287,6 +321,10 @@ func (a *app) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 			u := prURL(it.PR)
 			return tea.Batch(tea.SetClipboard(u), a.setFlash("copied "+u, false))
 		}
+	case key.Matches(msg, k.Hide):
+		if it := a.selectedItem(); it != nil {
+			return a.toggleHidden(*it)
+		}
 	case key.Matches(msg, k.Detail):
 		a.showDetail = !a.showDetail
 	case key.Matches(msg, k.ScrollDown):
@@ -306,6 +344,41 @@ func (a *app) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		return a.relist()
 	}
 	return nil
+}
+
+// toggleHidden hides it, the selected PR, until something new happens in it, or unhides it.
+// The row moves at once and the cursor goes to the nearest PR left, as when a PR disappears;
+// the list that follows the daemon's pr.annotated event replaces the guess.
+func (a *app) toggleHidden(it api.InboxItem) tea.Cmd {
+	if !a.connected {
+		return a.setFlash("not connected to the daemon", true)
+	}
+	k := it.PR.Key
+	ann := derive.HiddenAnnotation(it.PR, it.Classification)
+	verb, done := "hide", "hid "+k.String()+" until something new"
+	if it.Hidden {
+		ann = model.Annotation{PR: k, Key: derive.HiddenKey, Value: json.RawMessage("null")}
+		verb, done = "unhide", "unhid "+k.String()
+	}
+
+	an := a.anchorOf(a.tab)
+	// The list may share its backing array with the backend's response.
+	a.items = slices.Clone(a.items)
+	for i := range a.items {
+		if a.items[i].PR.Key == k {
+			a.items[i].Hidden = !it.Hidden
+		}
+	}
+	a.regroup()
+	a.restore(a.tab, anchor{keys: an.keys[1:]})
+
+	be, ctx := a.be, a.ctx
+	return func() tea.Msg {
+		if err := be.Annotate(ctx, ann); err != nil {
+			return hiddenMsg{text: verb + " " + k.String() + ": " + err.Error(), failed: true}
+		}
+		return hiddenMsg{text: done}
+	}
 }
 
 func (a *app) openCmd(u string) tea.Cmd {
@@ -360,6 +433,15 @@ func (a *app) relist() tea.Cmd {
 		}
 	}
 	return tea.Batch(cmds...)
+}
+
+// pingPlugins asks the NATS services which of them are alive, off the UI goroutine.
+func (a *app) pingPlugins() tea.Cmd {
+	if !a.connected {
+		return nil
+	}
+	be, ctx := a.be, a.ctx
+	return func() tea.Msg { return pluginsMsg{names: be.Plugins(ctx)} }
 }
 
 func (a *app) scheduleRelist(d time.Duration) tea.Cmd {
@@ -420,13 +502,8 @@ func (a *app) handleList(msg listMsg) tea.Cmd {
 }
 
 func (a *app) applyList(resp api.ListResponse) {
-	var anchors [len(tabDefs)]anchor
-	for ti := range anchors {
-		anchors[ti] = a.anchorOf(ti)
-	}
-
 	a.viewer = resp.Viewer
-	a.sections = groupItems(resp.Items)
+	a.items = resp.Items
 	present := map[model.PRKey]bool{}
 	for _, it := range resp.Items {
 		present[it.PR.Key] = true
@@ -437,38 +514,57 @@ func (a *app) applyList(resp api.ListResponse) {
 			delete(a.detailErrs, k)
 		}
 	}
-	a.rev++
+	a.regroup()
+}
 
+// regroup rebuilds the sections from the latest list and moves every tab's cursor back to
+// the PR it was on.
+func (a *app) regroup() {
+	var anchors [len(tabDefs)]anchor
+	for ti := range anchors {
+		anchors[ti] = a.anchorOf(ti)
+	}
+	a.sections = groupItems(a.items, a.showAll)
+	a.rev++
 	for ti, an := range anchors {
 		a.restore(ti, an)
 	}
 }
 
-// hiddenFromList reports whether it is kept out of the list: PRs of others with a
-// negative score. Own PRs are always listed.
-func hiddenFromList(it api.InboxItem) bool {
-	return it.Score < 0 && sectionTab[it.Section] == tabOthers
+// hiddenFromList reports whether it is kept out of the list. Own PRs and PRs that need
+// the viewer are always listed. Other PRs are hidden in the "needs me" view, and in the
+// "all" view when their score is negative.
+func hiddenFromList(it api.InboxItem, all bool) bool {
+	if it.NeedsMe || sectionTab[it.Section] != tabOthers {
+		return false
+	}
+	return !all || it.Score < 0
 }
 
-// groupItems sorts items into model.Sections order; inside a section the highest score
-// comes first, then the most recently updated. Items without a known section are dropped
-// and those matching hiddenFromList are only counted in section.hidden.
-func groupItems(items []api.InboxItem) []section {
-	secs := make([]section, len(model.Sections))
+// groupItems sorts items into displaySections order; inside a section the highest score
+// comes first, then the most recently updated. Items without a known model section are
+// dropped. Hidden items go to the hidden section of their tab whatever the view and score;
+// of the others, those matching hiddenFromList are only counted in section.hidden.
+func groupItems(items []api.InboxItem, all bool) []section {
+	secs := make([]section, len(displaySections))
 	idx := map[model.Section]int{}
-	for i, id := range model.Sections {
+	for i, id := range displaySections {
 		secs[i].id = id
 		idx[id] = i
 	}
 	for _, it := range items {
-		i, ok := idx[it.Section]
-		switch {
-		case !ok:
-		case hiddenFromList(it):
-			secs[i].hidden++
-		default:
-			secs[i].items = append(secs[i].items, it)
+		if !slices.Contains(model.Sections, it.Section) {
+			continue
 		}
+		i := idx[it.Section]
+		switch {
+		case it.Hidden:
+			i = idx[hiddenSections[sectionTab[it.Section]]]
+		case hiddenFromList(it, all):
+			secs[i].hidden++
+			continue
+		}
+		secs[i].items = append(secs[i].items, it)
 	}
 	for _, s := range secs {
 		slices.SortStableFunc(s.items, func(x, y api.InboxItem) int {

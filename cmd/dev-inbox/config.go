@@ -17,6 +17,9 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+// pluginsKey is the top-level key of the plugin namespace, which checkKeys leaves alone.
+const pluginsKey = "plugins"
+
 // section is a command whose flags are also settable under the key of the same name in the config file.
 // The flags double as the schema of the section: their names are its keys and their defaults its defaults.
 type section struct {
@@ -49,14 +52,17 @@ type settings struct {
 		PollInterval      string   `mapstructure:"poll-interval"`
 		ReconcileInterval string   `mapstructure:"reconcile-interval"`
 		LogLevel          string   `mapstructure:"log-level"`
-		PreferredTeam     string   `mapstructure:"preferred-team"`
 		Greylist          []string `mapstructure:"greylist"`
+		// PreferredTeams stays raw like Score: preferredTeams rejects 1.5 or "20" instead of coercing them.
+		PreferredTeams map[string]any `mapstructure:"preferred-teams"`
 		// Score stays raw: decoding into ints would coerce 1.5 or "20", which scoreWeights rejects.
 		Score map[string]any `mapstructure:"score"`
 	} `mapstructure:"serve"`
 	TUI struct {
 		NATSURL string `mapstructure:"nats-url"`
 	} `mapstructure:"tui"`
+	// Plugins exists so that UnmarshalExact accepts the namespace; the core never reads or validates it.
+	Plugins map[string]any `mapstructure:"plugins"`
 }
 
 // loadSettings resolves the settings of sec for cmd: flags set on the command line, then the config file,
@@ -108,7 +114,13 @@ func readConfigFile(cmd *cobra.Command) (v *viper.Viper, path string, err error)
 	return v, path, nil
 }
 
+// replacedTeamKeys are the keys the single preferred team used to have; checkKeys points them out to the
+// preferred-teams map.
+var replacedTeamKeys = []string{"serve.preferred-team", "serve.score.preferred-team"}
+
 // checkKeys rejects keys of v that no section defines, which catches typos that would otherwise be ignored.
+// Everything below the plugins key belongs to the plugins, and the keys below serve.preferred-teams are team
+// names; neither is checked.
 func checkKeys(v *viper.Viper, path string) error {
 	known := make(map[string]bool)
 	for _, sec := range sections {
@@ -121,13 +133,20 @@ func checkKeys(v *viper.Viper, path string) error {
 	for _, t := range scoreTerms {
 		known[serveSection.name+"."+scoreKey+"."+t.key] = true
 	}
+	teamsPrefix := serveSection.name + "." + preferredTeamsKey + "."
 	var errs []error
 	keys := v.AllKeys()
 	slices.Sort(keys)
 	for _, key := range keys {
-		if !known[key] {
-			errs = append(errs, fmt.Errorf("invalid config %s: unknown key %q", path, key))
+		if known[key] || key == pluginsKey || strings.HasPrefix(key, pluginsKey+".") || strings.HasPrefix(key, teamsPrefix) {
+			continue
 		}
+		if slices.Contains(replacedTeamKeys, key) {
+			errs = append(errs, fmt.Errorf("invalid config %s: unknown key %q: replaced by %s.%s (org/slug: points)",
+				path, key, serveSection.name, preferredTeamsKey))
+			continue
+		}
+		errs = append(errs, fmt.Errorf("invalid config %s: unknown key %q", path, key))
 	}
 	if len(errs) > 0 {
 		return usageError{errors.Join(errs...)}
@@ -190,7 +209,7 @@ func writeConfigTemplate(w io.Writer) error {
 	return err
 }
 
-// yamlDefault renders the default of f as a single-line YAML value.
+// yamlDefault renders the default of f as a single-line YAML value; an empty map becomes {}.
 func yamlDefault(f *pflag.Flag) (string, error) {
 	node := yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: f.DefValue}
 	switch v := f.Value.(type) {
@@ -200,8 +219,18 @@ func yamlDefault(f *pflag.Flag) (string, error) {
 			node.Content = append(node.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: item})
 		}
 	default:
-		if f.Value.Type() == "int" {
+		switch f.Value.Type() {
+		case "int":
 			node.Tag = "!!int"
+		case "stringToInt":
+			node = yaml.Node{Kind: yaml.MappingNode, Style: yaml.FlowStyle}
+			for _, pair := range strings.Split(strings.Trim(f.DefValue, "[]"), ",") {
+				if key, points, ok := strings.Cut(pair, "="); ok {
+					node.Content = append(node.Content,
+						&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+						&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: points})
+				}
+			}
 		}
 	}
 	out, err := yaml.Marshal(&node)

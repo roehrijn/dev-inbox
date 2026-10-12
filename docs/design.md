@@ -60,6 +60,8 @@ Ingestion has three sources:
    flooded with history.
 3. Reconcile every 5 minutes: `FetchStatuses` for all tracked open PRs; a PR whose status differs
    from the stored `PRStatus` gets a full fetch. Catches silent changes (CI, mergeability, merge queue).
+   Open PRs that currently need the viewer are fully refetched every cycle as well (at most 30, most
+   recently updated first), since reactions change no `updatedAt` and send no notification.
 
 All three feed one ingest worker (serialized, deduplicated queue): `FetchPR` → stored snapshot →
 `derive.Diff` → `store.ApplySnapshot` → `bus.Kick`.
@@ -86,6 +88,9 @@ after the viewer's last activity = latest of `LastPushAt`, the viewer's own comm
 Every classified PR carries an integer `Score`; inside a section the TUI orders by score descending,
 then `UpdatedAt` descending. The daemon computes it, so the list API and every event payload carry it.
 
+`Evaluate` also returns the non-zero contributions as `Classification.ScoreTerms` (label and points, in
+evaluation order, summing to `Score`), so the list API, events and the TUI detail pane can explain a score.
+
 Points per term are configurable in the config file only (`serve.score.<key>`); 0 disables a term.
 The TUI hides PRs of others with a negative score and shows how many it hid per section; the API and
 events still carry them.
@@ -93,19 +98,45 @@ events still carry them.
 | Term | Key | Default |
 |---|---|---|
 | PR-level annotation with key `linear.urgency` exists (any value) | `urgent` | +20 |
-| Author is a member of the preferred team (`serve --preferred-team org/slug`, incl. child teams) | `preferred-team` | +30 |
+| Author is a member of a preferred team (incl. child teams); the highest points of the author's teams, not the sum | `serve.preferred-teams` (`org/slug: points`), not under `score` | none |
 | Author is greylisted (`serve --greylist login`, repeatable, default `dependabot`, `renovate`; matched case-insensitively with or without `[bot]`) | `greylist` | -15 |
 | Review requested from the viewer personally (`Direct`, ★) | `direct` | +10 |
 | At least one check queued, in progress, pending, waiting or expected (`ChecksRunning > 0`) | `checks-running` | +5 |
 | Check rollup is `SUCCESS` (skipped and neutral count as success; no bonus without checks) | `checks-success` | +20 |
 | Per check concluded FAILURE, ERROR, TIMED_OUT, CANCELLED, STARTUP_FAILURE or ACTION_REQUIRED | `per-failing-check` | -10 each |
 | GitHub reports the PR as `CONFLICTING` (merge conflicts; `UNKNOWN` adds nothing) | `merge-conflict` | -40 |
+| The PR is a draft | `draft` | -5 |
 
 Check counts come from the rollup's per-state counts, so they are not capped like the listed check
 runs, and they are part of `PRStatus`: reconciliation refetches a PR when they change.
 
-Preferred team members are fetched at startup and every 6 hours, and cached in the store for offline
-starts. Score changes caused by membership changes emit no event.
+Members of the preferred teams are fetched at startup and every 6 hours, and cached in the store for
+offline starts. A team that is not found or not accessible contributes nothing; other fetch failures keep
+the team's previous members and retry after a minute. Score changes caused by membership changes emit no
+event.
+
+## Hiding (derive.HiddenKey)
+
+The viewer hides a PR until something new happens in it with the PR-level annotation `devinbox.hidden`,
+set through `devinbox.api.annotate` like any other annotation (TUI key `x`; a `null` value unhides). Its
+value is a `derive.HiddenMark` of the snapshot the viewer saw, built by `derive.HiddenAnnotation`:
+
+```json
+{"seen": "<FetchedAt>", "head": "<HeadSHA>", "draft": false, "requested": true}
+```
+
+`Evaluate` sets `Classification.Hidden` while nothing is new compared to that mark:
+
+- the head is unchanged (new commits, a rebase or a force-push change it),
+- the PR was not marked ready for review (`draft` true, now false),
+- review was not newly requested from the viewer personally (`requested` false, now `Direct`),
+- no comment or review by someone other than the viewer, a bot or a greylisted login is newer than `seen`.
+
+Checks, mergeability, labels, reactions and the viewer's own activity are not new. Using the snapshot's
+`FetchedAt` rather than the time of hiding means activity the daemon had not fetched yet when the viewer hid
+the PR still counts as new. Once something new happened the annotation stays but no longer hides; hiding
+again replaces it. Hidden PRs keep their section, score and reasons; the TUI lists them in a collapsed
+"Hidden until new activity" section per tab, and the flag is part of the list API and every event payload.
 
 ## Events (derive.Diff)
 

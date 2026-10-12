@@ -58,7 +58,7 @@ func TestViewWide(t *testing.T) {
 		"roehrijn/dev-inbox#3 · roehrijn · 2h ago · checks failing, changes requested",
 		"Ready to merge 0",
 		"▾ Your drafts 1",
-		"● WIP: detail pane",
+		"● ◌ WIP: detail pane",
 		"roehrijn/dev-inbox#4 · roehrijn · 3d ago · draft",
 		"Waiting for review 0",
 		"● connected · 5 PRs · @roehrijn · refreshed ",
@@ -196,6 +196,54 @@ func TestRowScoreSurvivesTinyWidths(t *testing.T) {
 	}
 }
 
+func TestRowDraftMark(t *testing.T) {
+	long := "Draft a very long title that cannot fit into the first line of a row at all"
+	tests := []struct {
+		name  string
+		draft bool
+		title string
+		w     int
+	}{
+		{"draft", true, "WIP: detail pane", 100},
+		{"not a draft", false, "WIP: detail pane", 100},
+		{"long draft wide", true, long, 80},
+		{"long draft narrow", true, long, 40},
+		{"long draft tiny", true, long, 16},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := newTestApp(&fakeBackend{})
+			it := item(prKey("o", "r", 1), model.SectionDrafts, tt.title, time.Hour)
+			it.PR.IsDraft = tt.draft
+			it.Score = 20
+			l1, l2 := a.renderRow(it, false, tt.w)
+			plain := ansi.Strip(l1)
+			if got := ansi.StringWidth(plain); got > tt.w {
+				t.Errorf("first line is %d cells wide, max %d: %q", got, tt.w, plain)
+			}
+			// The score at the end survives only if the mark is part of the title's budget.
+			if !strings.HasSuffix(plain, "20") {
+				t.Errorf("first line %q lost the score", plain)
+			}
+			if !tt.draft {
+				if strings.Contains(plain, "◌") {
+					t.Errorf("non-draft row marked: %q", plain)
+				}
+				return
+			}
+			if !strings.Contains(plain, "◌ "+tt.title[:3]) {
+				t.Errorf("first line %q has no ◌ right before the title", plain)
+			}
+			if !strings.Contains(l1, a.st.draft.Render("◌")) {
+				t.Errorf("mark is not rendered in the draft style: %q", l1)
+			}
+			if tt.w >= 80 && !strings.Contains(ansi.Strip(l2), "draft") {
+				t.Errorf("second line %q lost the draft legend", ansi.Strip(l2))
+			}
+		})
+	}
+}
+
 func TestRenderScoreColors(t *testing.T) {
 	a := newTestApp(&fakeBackend{})
 	if got := a.renderScore(0); got != "" {
@@ -251,7 +299,7 @@ func TestViewZeroItems(t *testing.T) {
 func TestViewMissingFields(t *testing.T) {
 	list := api.ListResponse{Items: []api.InboxItem{{
 		PR:             model.PR{Key: prKey("o", "r", 1)},
-		Classification: model.Classification{Section: model.SectionInvolved},
+		Classification: model.Classification{Section: model.SectionInvolved, NeedsMe: true},
 	}}}
 	a, _ := loadedApp(t, list, 80, 20)
 	press(t, a, "2")
@@ -435,4 +483,104 @@ func TestStatusShowsRefreshError(t *testing.T) {
 	a, _ := loadedApp(t, fixtureList(), 120, 20)
 	update(t, a, listMsg{seq: a.listSeq + 1, err: errors.New("timeout")})
 	assertContains(t, screen(a), "refresh failed: timeout", "5 PRs")
+}
+
+func scoreTermsItem(terms ...model.ScoreTerm) api.InboxItem {
+	it := scoredItem(model.SectionNeedsAction, 1, 0, time.Hour)
+	it.ScoreTerms = terms
+	for _, t := range terms {
+		it.Score += t.Points
+	}
+	return it
+}
+
+func TestDetailScoreSection(t *testing.T) {
+	a := newTestApp(&fakeBackend{})
+	it := scoreTermsItem(
+		model.ScoreTerm{Term: "urgent", Points: 30},
+		model.ScoreTerm{Term: "failing checks", Points: -40},
+		model.ScoreTerm{Term: "draft", Points: -5},
+		model.ScoreTerm{Term: "needs you", Points: 100},
+	)
+	it.Annotations = []model.Annotation{badgeAnn(it.PR.Key, "linear.id", `"DEVOPS-42"`)}
+	out := ansi.Strip(a.renderPR(it, true, nil, 80))
+	assertOrder(t, out, "Priority 85", "Score 85", "urgent", "+30", "failing checks", "-40", "draft", "-5", "needs you", "+100", "Annotations")
+
+	var lines []string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "  ") && (strings.HasSuffix(l, "0") || strings.HasSuffix(l, "5")) && !strings.Contains(l, "linear.id") {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) != 4 {
+		t.Fatalf("score lines = %q, want 4", lines)
+	}
+	end := ansi.StringWidth(lines[0])
+	for _, l := range lines {
+		if got := ansi.StringWidth(l); got != end {
+			t.Errorf("points column not aligned: %q is %d cells, want %d", l, got, end)
+		}
+	}
+	for i, want := range []string{"urgent  ", "failing checks", "draft", "needs you"} {
+		if !strings.HasPrefix(lines[i], "  "+want) {
+			t.Errorf("line %d = %q, want label %q", i, lines[i], want)
+		}
+	}
+	for i, want := range []string{"  +30", "  -40", "   -5", "+100"} {
+		if !strings.HasSuffix(lines[i], want) {
+			t.Errorf("line %d = %q, want points %q right-aligned", i, lines[i], want)
+		}
+	}
+}
+
+func TestDetailScoreStyles(t *testing.T) {
+	a := newTestApp(&fakeBackend{})
+	var b strings.Builder
+	a.writeScore(&b, scoreTermsItem(model.ScoreTerm{Term: "up", Points: 10}, model.ScoreTerm{Term: "down", Points: -10}), 40)
+	lines := strings.Split(strings.TrimSpace(b.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("got %q", lines)
+	}
+	if !strings.HasSuffix(lines[1], a.st.accent.Render("+10")) {
+		t.Errorf("positive points not in accent style: %q", lines[1])
+	}
+	if !strings.HasSuffix(lines[2], a.st.muted.Render("-10")) {
+		t.Errorf("negative points not in muted style: %q", lines[2])
+	}
+}
+
+func TestDetailScoreOmittedWithoutTerms(t *testing.T) {
+	a := newTestApp(&fakeBackend{})
+	it := scoreTermsItem()
+	it.Score = 20
+	out := ansi.Strip(a.renderPR(it, true, nil, 80))
+	if strings.Contains(out, "Score") {
+		t.Errorf("score section shown without terms:\n%s", out)
+	}
+	assertContains(t, out, "Priority 20")
+}
+
+func TestDetailScoreTruncatesToWidth(t *testing.T) {
+	a := newTestApp(&fakeBackend{})
+	it := scoreTermsItem(
+		model.ScoreTerm{Term: "team acme-co/web-platform-core", Points: 20},
+		model.ScoreTerm{Term: "changes since your review", Points: -140},
+		model.ScoreTerm{Term: "x", Points: 5},
+	)
+	for _, w := range []int{60, 20, 12, 8, 4, 2} {
+		var b strings.Builder
+		a.writeScore(&b, it, w)
+		for _, l := range strings.Split(strings.TrimSpace(b.String()), "\n")[1:] {
+			if lw := ansi.StringWidth(l); lw > w {
+				t.Errorf("w=%d: line is %d cells wide: %q", w, lw, ansi.Strip(l))
+			}
+		}
+	}
+	var b strings.Builder
+	a.writeScore(&b, it, 20)
+	out := ansi.Strip(b.String())
+	assertContains(t, out, "team acme-c…   +20", "-140")
+	if strings.Contains(out, "web-platform-core") {
+		t.Errorf("long label not truncated:\n%s", out)
+	}
 }

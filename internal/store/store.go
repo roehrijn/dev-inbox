@@ -363,10 +363,10 @@ func (s *Store) Annotations(ctx context.Context, key model.PRKey) ([]model.Annot
 		key.Owner, key.Repo, key.Number)
 }
 
-// AllAnnotations returns the PR-level annotations (CommentID empty) of all PRs.
-func (s *Store) AllAnnotations(ctx context.Context) (map[model.PRKey][]model.Annotation, error) {
+// AnnotationsByPR returns the PR- and comment-level annotations of all PRs, grouped by PR, PR-level first.
+func (s *Store) AnnotationsByPR(ctx context.Context) (map[model.PRKey][]model.Annotation, error) {
 	list, err := s.queryAnnotations(ctx,
-		selectAnnotations+` WHERE a.comment_id = '' ORDER BY p.owner, p.repo, p.number, a.key`)
+		selectAnnotations+` ORDER BY p.owner, p.repo, p.number, a.comment_id, a.key`)
 	if err != nil {
 		return nil, err
 	}

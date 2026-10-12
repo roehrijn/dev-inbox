@@ -1,7 +1,9 @@
 package github
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"os"
 	"slices"
 	"strings"
@@ -22,6 +24,9 @@ func TestLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	var warnings bytes.Buffer
+	c.SetLogger(slog.New(slog.NewTextHandler(&warnings, nil)))
 
 	v, err := c.Viewer(ctx)
 	if err != nil {
@@ -85,8 +90,11 @@ func TestLive(t *testing.T) {
 			}
 		}
 	}
+	var withReviewSHAs, reviewsWithSHA, threads, resolved, inlineWithSHA int
 	for _, k := range sample {
+		start := time.Now()
 		pr, err := c.FetchPR(ctx, k)
+		fetchElapsed := time.Since(start)
 		if err != nil {
 			t.Fatalf("FetchPR %s: %v", k, err)
 		}
@@ -101,9 +109,15 @@ func TestLive(t *testing.T) {
 			t.Errorf("FetchPR %d: comments not sorted", k.Number)
 		}
 		kinds := map[model.CommentKind]int{}
-		bots, replies, lines := 0, 0, 0
+		bots, replies, lines, reacted := 0, 0, 0, 0
 		for _, cm := range pr.Comments {
 			kinds[cm.Kind]++
+			if len(cm.ViewerReactions) > 0 {
+				reacted++
+			}
+			if slices.Contains(cm.ViewerReactions, "") {
+				t.Errorf("FetchPR %d: comment with an empty reaction content", k.Number)
+			}
 			if strings.HasSuffix(cm.Author, "[bot]") {
 				bots++
 			}
@@ -112,6 +126,35 @@ func TestLive(t *testing.T) {
 			}
 			if cm.Kind == model.CommentInline && cm.Path != "" && cm.Line > 0 {
 				lines++
+			}
+		}
+		shas := 0
+		for _, r := range pr.Reviews {
+			if r.CommitSHA != "" {
+				shas++
+			}
+		}
+		if shas > 0 {
+			withReviewSHAs++
+		}
+		reviewsWithSHA += shas
+		threadIDs := map[string]bool{}
+		for _, th := range pr.ReviewThreads {
+			threadIDs[th.ID] = true
+			if th.IsResolved {
+				resolved++
+			}
+		}
+		threads += len(pr.ReviewThreads)
+		for _, cm := range pr.Comments {
+			if cm.Kind != model.CommentInline {
+				continue
+			}
+			if !threadIDs[cm.ThreadID] {
+				t.Errorf("FetchPR %d: inline comment without a known thread", k.Number)
+			}
+			if cm.CommitSHA != "" {
+				inlineWithSHA++
 			}
 		}
 		teams := 0
@@ -123,10 +166,14 @@ func TestLive(t *testing.T) {
 		if pr.Checks == model.ChecksNone && (pr.ChecksRunning != 0 || pr.ChecksFailing != 0) {
 			t.Errorf("FetchPR %d: no checks but running=%d failing=%d", k.Number, pr.ChecksRunning, pr.ChecksFailing)
 		}
-		t.Logf("FetchPR: checks=%q running=%d failing=%d checkRuns=%d reviews=%d reviewRequests=%d (teams=%d) comments=%v botComments=%d inlineWithPathLine=%d replies=%d labels=%d mergeable=%s mergeState=%s decision=%q",
-			pr.Checks, pr.ChecksRunning, pr.ChecksFailing, len(pr.CheckRuns), len(pr.Reviews), len(pr.ReviewRequests), teams, kinds, bots, lines, replies, len(pr.Labels),
+		t.Logf("FetchPR: elapsed=%s reviewsWithSHA=%d/%d threads=%d", fetchElapsed.Round(time.Millisecond), shas, len(pr.Reviews), len(pr.ReviewThreads))
+		t.Logf("FetchPR: checks=%q running=%d failing=%d checkRuns=%d reviews=%d reviewRequests=%d (teams=%d) comments=%v botComments=%d inlineWithPathLine=%d replies=%d reactedByViewer=%d labels=%d mergeable=%s mergeState=%s decision=%q",
+			pr.Checks, pr.ChecksRunning, pr.ChecksFailing, len(pr.CheckRuns), len(pr.Reviews), len(pr.ReviewRequests), teams, kinds, bots, lines, replies, reacted, len(pr.Labels),
 			pr.Mergeable, pr.MergeStateStatus, pr.ReviewDecision)
 	}
+
+	t.Logf("review data: prs=%d prsWithReviewSHAs=%d reviewsWithSHA=%d threads=%d resolved=%d inlineWithSHA=%d truncationWarnings=%d",
+		len(sample), withReviewSHAs, reviewsWithSHA, threads, resolved, inlineWithSHA, bytes.Count(warnings.Bytes(), []byte("truncated")))
 
 	missing := []model.PRKey{
 		{Owner: v.Login, Repo: "dev-inbox-does-not-exist-7f3a", Number: 1},

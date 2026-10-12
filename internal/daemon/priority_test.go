@@ -19,30 +19,33 @@ import (
 	"github.com/roehrijn/dev-inbox/internal/store"
 )
 
-const preferredTeam = "acme-co/control-plane"
+const (
+	preferredTeam = "acme-co/control-plane"
+	teamPoints    = 30
+)
 
 var urgency = json.RawMessage(`{"badge":"P1","level":"crit"}`)
 
+// requestedScore is the score of a PR with a direct review request and nothing else: the request is an
+// attention reason, so it also earns the needs-me bonus.
+var requestedScore = derive.DefaultWeights.Direct + derive.DefaultWeights.NeedsMe
+
 func teamConfig(dir string) Config {
 	cfg := testConfig(dir)
-	cfg.PreferredTeam = preferredTeam
+	cfg.PreferredTeams = map[string]int{preferredTeam: teamPoints}
 	cfg.Greylist = DefaultGreylist
 	return cfg
 }
 
-// seedTeamCache stores members as a previous run would have cached them.
-func seedTeamCache(t *testing.T, dir, team string, members ...string) {
+// seedTeamCache stores raw as a previous run would have cached the preferred teams.
+func seedTeamCache(t *testing.T, dir, raw string) {
 	t.Helper()
-	raw, err := json.Marshal(cachedTeam{Team: team, Members: members})
-	if err != nil {
-		t.Fatal(err)
-	}
 	st, err := store.Open(filepath.Join(dir, "inbox.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	defer func() { _ = st.Close() }()
-	if err := st.SetMeta(context.Background(), metaPreferredTeam, string(raw)); err != nil {
+	if err := st.SetMeta(context.Background(), metaPreferredTeams, raw); err != nil {
 		t.Fatalf("seed team cache: %v", err)
 	}
 }
@@ -64,16 +67,15 @@ func seedAnnotation(t *testing.T, dir string, a model.Annotation) {
 	}
 }
 
-// waitTeamCached waits until the cache holds n members.
-func (r *running) waitTeamCached(t *testing.T, n int) cachedTeam {
+// waitTeamsCached waits until the cache holds exactly want.
+func (r *running) waitTeamsCached(t *testing.T, want map[string][]string) {
 	t.Helper()
-	var c cachedTeam
-	eventually(t, "preferred team cache", func() bool {
-		raw, ok := r.meta(t, metaPreferredTeam)
-		c = cachedTeam{}
-		return ok && json.Unmarshal([]byte(raw), &c) == nil && len(c.Members) == n
+	var got map[string][]string
+	eventually(t, "preferred teams cache", func() bool {
+		raw, ok := r.meta(t, metaPreferredTeams)
+		got = nil
+		return ok && json.Unmarshal([]byte(raw), &got) == nil && reflect.DeepEqual(got, want)
 	})
-	return c
 }
 
 func (r *running) scores(t *testing.T) map[model.PRKey]int {
@@ -118,10 +120,10 @@ func TestListScores(t *testing.T) {
 	gh.teams[preferredTeam] = []string{"alice", "bob"}
 
 	r := startDaemon(t, teamConfig(dir), gh)
-	r.waitTeamCached(t, 2)
+	r.waitTeamsCached(t, map[string][]string{preferredTeam: {"alice", "bob"}})
 
 	want := map[model.PRKey]int{
-		preferred.Key:  derive.DefaultWeights.PreferredTeam + derive.DefaultWeights.Direct,
+		preferred.Key:  teamPoints + requestedScore,
 		greylisted.Key: derive.DefaultWeights.Greylist,
 		plain.Key:      0,
 	}
@@ -141,7 +143,9 @@ func TestListScores(t *testing.T) {
 }
 
 // customWeights differ from derive.DefaultWeights in every term, and Greylist is positive.
-var customWeights = derive.Weights{Urgent: 3, PreferredTeam: 5, Greylist: 11, Direct: 2}
+var customWeights = derive.Weights{Urgent: 3, Greylist: 11, Direct: 2}
+
+const customTeamPoints = 5
 
 func TestListScoresUseConfiguredWeights(t *testing.T) {
 	t.Parallel()
@@ -155,12 +159,13 @@ func TestListScoresUseConfiguredWeights(t *testing.T) {
 	gh.teams[preferredTeam] = []string{"alice", "bob"}
 
 	cfg := teamConfig(dir)
+	cfg.PreferredTeams[preferredTeam] = customTeamPoints
 	cfg.Weights = customWeights
 	r := startDaemon(t, cfg, gh)
-	r.waitTeamCached(t, 2)
+	r.waitTeamsCached(t, map[string][]string{preferredTeam: {"alice", "bob"}})
 
 	want := map[model.PRKey]int{
-		preferred.Key:  customWeights.PreferredTeam + customWeights.Direct,
+		preferred.Key:  customTeamPoints + customWeights.Direct,
 		greylisted.Key: customWeights.Greylist,
 		direct.Key:     customWeights.Direct,
 	}
@@ -190,13 +195,14 @@ func TestEventsCarryConfiguredWeights(t *testing.T) {
 	gh.notify(github.Notification{ThreadID: "t", Reason: "review_requested", PR: pr.Key, UpdatedAt: baseTime})
 
 	cfg := teamConfig(dir)
+	cfg.PreferredTeams[preferredTeam] = customTeamPoints
 	cfg.Weights = customWeights
 	r := startDaemon(t, cfg, gh)
 	evs := r.settledEvents(t, 2)
 	if got := eventTypes(evs); !reflect.DeepEqual(got, []string{"devinbox.pr.discovered", "devinbox.pr.review_requested"}) {
 		t.Fatalf("event types = %q", got)
 	}
-	score := customWeights.PreferredTeam + customWeights.Direct
+	score := customTeamPoints + customWeights.Direct
 	for _, ev := range evs {
 		if got := eventScore(t, ev); got != score {
 			t.Errorf("%s score = %d, want %d", ev.ce.Type, got, score)
@@ -213,41 +219,98 @@ func TestEventsCarryConfiguredWeights(t *testing.T) {
 	}
 }
 
+// TestPreferredTeamsScore ingests PRs only after every team was fetched, so even the first events
+// carry the team points.
+func TestPreferredTeamsScore(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	seed(t, dir, true)
+	authors := []string{"alice", "bob", "Carol", "dave", "eve"}
+	var prs []model.PR
+	for i, a := range authors {
+		prs = append(prs, openPR(i+1, a))
+	}
+	gh := newFake(prs...)
+	gh.teams["org/a"] = []string{"alice", "carol", "dave"}
+	gh.teams["org/b"] = []string{"bob", "dave"}
+	gh.teams["org/c"] = []string{"carol"}
+	for _, pr := range prs {
+		gh.notify(github.Notification{ThreadID: pr.NodeID, Reason: "mention", PR: pr.Key, UpdatedAt: baseTime})
+	}
+
+	cfg := testConfig(dir)
+	cfg.PreferredTeams = map[string]int{"org/a": 30, "org/b": -10, "org/c": 50}
+	r := startDaemon(t, cfg, gh)
+
+	want := map[string]int{
+		"alice": 30,
+		"bob":   -10,
+		"Carol": 50, // highest of a and c, matched case-insensitively
+		"dave":  30, // highest of a and the negative b
+		"eve":   0,
+	}
+	got := map[string]int{}
+	eventually(t, "a discovered event per PR", func() bool {
+		for _, ev := range r.streamEvents(t) {
+			if ev.ce.Type != "devinbox.pr.discovered" {
+				continue
+			}
+			var data model.EventData
+			if err := json.Unmarshal(ev.ce.Data, &data); err != nil {
+				t.Fatalf("decode event data: %v", err)
+			}
+			got[data.PR.Author] = data.Score
+		}
+		return len(got) == len(prs)
+	})
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("discovered scores by author = %v, want %v", got, want)
+	}
+	if calls := gh.callsOf("TeamMembers"); len(calls) != 3 {
+		t.Errorf("TeamMembers calls = %+v, want one per team", calls)
+	}
+}
+
 func TestPreferredTeamDisabled(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	pr := openPR(1, "alice")
 	seed(t, dir, true, pr)
-	seedTeamCache(t, dir, preferredTeam, "alice")
+	seedTeamCache(t, dir, `{"`+preferredTeam+`":["alice"]}`)
 	gh := newFake(pr)
 	gh.teams[preferredTeam] = []string{"alice"}
 
-	r := startDaemon(t, testConfig(dir), gh)
+	cfg := testConfig(dir)
+	cfg.PreferredTeams = map[string]int{}
+	r := startDaemon(t, cfg, gh)
 	eventually(t, "notification polls", func() bool { return len(gh.callsOf("Notifications")) >= 2 })
 
 	if n := len(gh.callsOf("TeamMembers")); n != 0 {
-		t.Errorf("TeamMembers calls = %d, want 0 without a preferred team", n)
+		t.Errorf("TeamMembers calls = %d, want 0 without preferred teams", n)
 	}
 	if got := r.scores(t)[pr.Key]; got != 0 {
-		t.Errorf("score = %d, want 0 without a preferred team", got)
+		t.Errorf("score = %d, want 0 without preferred teams", got)
 	}
 }
 
-func TestPreferredTeamFetchedOnceAndCached(t *testing.T) {
+func TestPreferredTeamsFetchedOnceAndCached(t *testing.T) {
 	t.Parallel()
 	gh := newFake()
 	gh.teams[preferredTeam] = []string{"alice", "bob"}
+	gh.teams["acme-co/other"] = []string{"carol"}
 
-	r := startDaemon(t, teamConfig(t.TempDir()), gh)
-	cached := r.waitTeamCached(t, 2)
-	if want := (cachedTeam{Team: preferredTeam, Members: []string{"alice", "bob"}}); !reflect.DeepEqual(cached, want) {
-		t.Errorf("cache = %+v, want %+v", cached, want)
-	}
+	cfg := teamConfig(t.TempDir())
+	cfg.PreferredTeams["acme-co/other"] = 10
+	r := startDaemon(t, cfg, gh)
+	r.waitTeamsCached(t, map[string][]string{preferredTeam: {"alice", "bob"}, "acme-co/other": {"carol"}})
 
 	eventually(t, "notification polls", func() bool { return len(gh.callsOf("Notifications")) >= 3 })
-	calls := gh.callsOf("TeamMembers")
-	if len(calls) != 1 || calls[0].query != preferredTeam {
-		t.Errorf("TeamMembers calls = %+v, want one for %s", calls, preferredTeam)
+	var teams []string
+	for _, c := range gh.callsOf("TeamMembers") {
+		teams = append(teams, c.query)
+	}
+	if want := []string{preferredTeam, "acme-co/other"}; !reflect.DeepEqual(teams, want) {
+		t.Errorf("TeamMembers calls = %q, want %q", teams, want)
 	}
 }
 
@@ -259,7 +322,7 @@ func TestPreferredTeamOfflineRestart(t *testing.T) {
 	online := newFake(pr)
 	online.teams[preferredTeam] = []string{"alice"}
 	first := startDaemon(t, teamConfig(dir), online)
-	first.waitTeamCached(t, 1)
+	first.waitTeamsCached(t, map[string][]string{preferredTeam: {"alice"}})
 	first.stop()
 
 	offline := newFake(pr)
@@ -268,40 +331,79 @@ func TestPreferredTeamOfflineRestart(t *testing.T) {
 	second := startDaemon(t, teamConfig(dir), offline)
 	eventually(t, "team fetch attempt", func() bool { return len(offline.callsOf("TeamMembers")) >= 1 })
 
-	if got := second.scores(t)[pr.Key]; got != derive.DefaultWeights.PreferredTeam {
-		t.Errorf("score after offline restart = %d, want %d", got, derive.DefaultWeights.PreferredTeam)
+	if got := second.scores(t)[pr.Key]; got != teamPoints {
+		t.Errorf("score after offline restart = %d, want %d", got, teamPoints)
 	}
 }
 
 func TestPreferredTeamCache(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name string
-		team string
-		want int
+		name  string
+		cache string
+		teams map[string]int
+		want  map[model.PRKey]int
 	}{
-		{name: "same team", team: preferredTeam, want: derive.DefaultWeights.PreferredTeam},
-		{name: "same team in other case", team: "Acme-CO/Control-Plane", want: derive.DefaultWeights.PreferredTeam},
-		{name: "other team", team: "acme-co/other", want: 0},
-		{name: "other org", team: "other-org/control-plane", want: 0},
+		{
+			name:  "same team",
+			cache: `{"acme-co/control-plane":["alice"]}`,
+			teams: map[string]int{preferredTeam: teamPoints},
+			want:  map[model.PRKey]int{prKey(1): teamPoints, prKey(2): 0},
+		},
+		{
+			name:  "same team in other case",
+			cache: `{"acme-co/control-plane":["alice"]}`,
+			teams: map[string]int{"Acme-CO/Control-Plane": teamPoints},
+			want:  map[model.PRKey]int{prKey(1): teamPoints, prKey(2): 0},
+		},
+		{
+			name:  "unconfigured team ignored",
+			cache: `{"acme-co/control-plane":["alice"],"acme-co/other":["bob"]}`,
+			teams: map[string]int{preferredTeam: teamPoints},
+			want:  map[model.PRKey]int{prKey(1): teamPoints, prKey(2): 0},
+		},
+		{
+			name:  "only other teams cached",
+			cache: `{"acme-co/other":["alice"],"other-org/control-plane":["bob"]}`,
+			teams: map[string]int{preferredTeam: teamPoints},
+			want:  map[model.PRKey]int{prKey(1): 0, prKey(2): 0},
+		},
+		{
+			name:  "two configured teams",
+			cache: `{"acme-co/control-plane":["alice"],"acme-co/other":["bob"]}`,
+			teams: map[string]int{preferredTeam: teamPoints, "acme-co/other": -10},
+			want:  map[model.PRKey]int{prKey(1): teamPoints, prKey(2): -10},
+		},
+		{
+			name:  "corrupt cache",
+			cache: `{"acme-co/control-plane":`,
+			teams: map[string]int{preferredTeam: teamPoints},
+			want:  map[model.PRKey]int{prKey(1): 0, prKey(2): 0},
+		},
+		{
+			name:  "single-team format",
+			cache: `{"team":"acme-co/control-plane","members":["alice"]}`,
+			teams: map[string]int{preferredTeam: teamPoints},
+			want:  map[model.PRKey]int{prKey(1): 0, prKey(2): 0},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
-			pr := openPR(1, "alice")
-			seed(t, dir, true, pr)
-			seedTeamCache(t, dir, preferredTeam, "alice")
-			gh := newFake(pr)
+			alice, bob := openPR(1, "alice"), openPR(2, "bob")
+			seed(t, dir, true, alice, bob)
+			seedTeamCache(t, dir, tt.cache)
+			gh := newFake(alice, bob)
 			gh.teamErr = errors.New("network unreachable")
 
 			cfg := teamConfig(dir)
-			cfg.PreferredTeam = tt.team
+			cfg.PreferredTeams = tt.teams
 			r := startDaemon(t, cfg, gh)
-			eventually(t, "team fetch attempt", func() bool { return len(gh.callsOf("TeamMembers")) >= 1 })
+			eventually(t, "team fetch attempt", func() bool { return len(gh.callsOf("TeamMembers")) >= len(tt.teams) })
 
-			if got := r.scores(t)[pr.Key]; got != tt.want {
-				t.Errorf("score = %d, want %d", got, tt.want)
+			if got := r.scores(t); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("scores = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -327,28 +429,117 @@ func (l *logBuffer) count(substr string) int {
 func TestPreferredTeamNotFound(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	pr := openPR(1, "alice")
-	seed(t, dir, true, pr)
-	seedTeamCache(t, dir, preferredTeam, "alice")
-	gh := newFake(pr)
+	alice, bob := openPR(1, "alice"), openPR(2, "bob")
+	seed(t, dir, true, alice, bob)
+	seedTeamCache(t, dir, `{"acme-co/control-plane":["alice"],"acme-co/gone":["bob"]}`)
+	gh := newFake(alice, bob)
+	gh.teams["acme-co/other"] = []string{"bob"}
 	logs := &logBuffer{}
 
 	cfg := teamConfig(dir)
+	cfg.PreferredTeams["acme-co/other"] = 10
 	cfg.Logger = slog.New(slog.NewTextHandler(logs, nil))
 	r := startDaemon(t, cfg, gh)
-	if cached := r.waitTeamCached(t, 0); cached.Team != preferredTeam {
-		t.Errorf("cache = %+v, want the configured team with no members", cached)
-	}
+	r.waitTeamsCached(t, map[string][]string{preferredTeam: nil, "acme-co/other": {"bob"}})
 	eventually(t, "notification polls", func() bool { return len(gh.callsOf("Notifications")) >= 3 })
 
-	if got := r.scores(t)[pr.Key]; got != 0 {
-		t.Errorf("score = %d, want 0 for an unknown team", got)
+	if got, want := r.scores(t), map[model.PRKey]int{alice.Key: 0, bob.Key: 10}; !reflect.DeepEqual(got, want) {
+		t.Errorf("scores = %v, want %v", got, want)
 	}
-	if n := len(gh.callsOf("TeamMembers")); n != 1 {
-		t.Errorf("TeamMembers calls = %d, want 1", n)
+	if n := len(gh.callsOf("TeamMembers")); n != 2 {
+		t.Errorf("TeamMembers calls = %d, want 2", n)
 	}
 	if n := logs.count("preferred team not found"); n != 1 {
 		t.Errorf("not-found warnings = %d, want 1", n)
+	}
+	if n := logs.count("team=" + preferredTeam); n != 1 {
+		t.Errorf("warnings naming %s = %d, want 1", preferredTeam, n)
+	}
+}
+
+// TestRefreshTeams drives refreshTeams by hand, since the daemon would only retry after retryInterval.
+func TestRefreshTeams(t *testing.T) {
+	t.Parallel()
+	const other = "acme-co/other"
+	gh := newFake()
+	gh.teams[preferredTeam] = []string{"alice"}
+	gh.teams[other] = []string{"bob"}
+	cfg := teamConfig(t.TempDir())
+	cfg.PreferredTeams[other] = -10
+	cfg.PreferredTeams["acme-co/missing"] = 7
+	d, err := start(cfg, gh)
+	if err != nil {
+		t.Fatalf("start daemon: %v", err)
+	}
+	t.Cleanup(d.close)
+	ctx := context.Background()
+	transient := errors.New("network unreachable")
+
+	teams := func(cp, oth, missing []string) []derive.TeamBoost {
+		return []derive.TeamBoost{
+			{Team: preferredTeam, Points: teamPoints, Members: cp},
+			{Team: "acme-co/missing", Points: 7, Members: missing},
+			{Team: other, Points: -10, Members: oth},
+		}
+	}
+	if got, want := d.inputs(nil).Priority.Teams, teams(nil, nil, nil); !reflect.DeepEqual(got, want) {
+		t.Fatalf("teams before refresh = %+v, want %+v", got, want)
+	}
+
+	steps := []struct {
+		name      string
+		change    func()
+		wait      time.Duration
+		teams     []derive.TeamBoost
+		wantCache map[string][]string
+	}{
+		{
+			name:      "missing team",
+			wait:      viewerRefreshInterval,
+			teams:     teams([]string{"alice"}, []string{"bob"}, nil),
+			wantCache: map[string][]string{preferredTeam: {"alice"}, other: {"bob"}, "acme-co/missing": nil},
+		},
+		{
+			name: "transient failure keeps previous members",
+			change: func() {
+				gh.teamErrs[preferredTeam] = transient
+				gh.teams[other] = []string{"bob", "dave"}
+			},
+			wait:      retryInterval,
+			teams:     teams([]string{"alice"}, []string{"bob", "dave"}, nil),
+			wantCache: map[string][]string{preferredTeam: {"alice"}, other: {"bob", "dave"}, "acme-co/missing": nil},
+		},
+		{
+			name: "recovered",
+			change: func() {
+				delete(gh.teamErrs, preferredTeam)
+				gh.teams[preferredTeam] = []string{"carol"}
+			},
+			wait:      viewerRefreshInterval,
+			teams:     teams([]string{"carol"}, []string{"bob", "dave"}, nil),
+			wantCache: map[string][]string{preferredTeam: {"carol"}, other: {"bob", "dave"}, "acme-co/missing": nil},
+		},
+	}
+	for _, s := range steps {
+		if s.change != nil {
+			gh.mu.Lock()
+			s.change()
+			gh.mu.Unlock()
+		}
+		if got := d.refreshTeams(ctx); got != s.wait {
+			t.Errorf("%s: wait = %v, want %v", s.name, got, s.wait)
+		}
+		if got := d.inputs(nil).Priority.Teams; !reflect.DeepEqual(got, s.teams) {
+			t.Errorf("%s: teams = %+v, want %+v", s.name, got, s.teams)
+		}
+		raw, _, err := d.store.Meta(ctx, metaPreferredTeams)
+		var cache map[string][]string
+		if err == nil {
+			err = json.Unmarshal([]byte(raw), &cache)
+		}
+		if err != nil || !reflect.DeepEqual(cache, s.wantCache) {
+			t.Errorf("%s: cache = %v (err %v), want %v", s.name, cache, err, s.wantCache)
+		}
 	}
 }
 
@@ -370,13 +561,13 @@ func TestAnnotateUpdatesScore(t *testing.T) {
 		a    model.Annotation
 		want int
 	}{
-		{name: "set urgency", a: prLevel, want: derive.DefaultWeights.Direct + derive.DefaultWeights.Urgent},
-		{name: "replace urgency", a: prLevel, want: derive.DefaultWeights.Direct + derive.DefaultWeights.Urgent},
-		{name: "comment-level urgency", a: commentLevel, want: derive.DefaultWeights.Direct + derive.DefaultWeights.Urgent},
-		{name: "delete urgency", a: deleted, want: derive.DefaultWeights.Direct},
+		{name: "set urgency", a: prLevel, want: requestedScore + derive.DefaultWeights.Urgent},
+		{name: "replace urgency", a: prLevel, want: requestedScore + derive.DefaultWeights.Urgent},
+		{name: "comment-level urgency", a: commentLevel, want: requestedScore + derive.DefaultWeights.Urgent},
+		{name: "delete urgency", a: deleted, want: requestedScore},
 	}
-	if got := r.scores(t)[pr.Key]; got != derive.DefaultWeights.Direct {
-		t.Fatalf("initial score = %d, want %d", got, derive.DefaultWeights.Direct)
+	if got := r.scores(t)[pr.Key]; got != requestedScore {
+		t.Fatalf("initial score = %d, want %d", got, requestedScore)
 	}
 	for _, s := range steps {
 		r.annotate(t, s.a)
@@ -388,8 +579,8 @@ func TestAnnotateUpdatesScore(t *testing.T) {
 			t.Errorf("%s: pr.annotated score = %d, want %d", s.name, got, s.want)
 		}
 	}
-	if got := r.scores(t)[pr.Key]; got != derive.DefaultWeights.Direct {
-		t.Errorf("score after delete = %d, want %d", got, derive.DefaultWeights.Direct)
+	if got := r.scores(t)[pr.Key]; got != requestedScore {
+		t.Errorf("score after delete = %d, want %d", got, requestedScore)
 	}
 }
 
@@ -411,8 +602,8 @@ func TestIngestEventsCarryScores(t *testing.T) {
 			t.Fatalf("event types = %q", got)
 		}
 		for _, ev := range evs {
-			if got := eventScore(t, ev); got != derive.DefaultWeights.PreferredTeam+derive.DefaultWeights.Direct {
-				t.Errorf("%s score = %d, want %d", ev.ce.Type, got, derive.DefaultWeights.PreferredTeam+derive.DefaultWeights.Direct)
+			if got, want := eventScore(t, ev), teamPoints+requestedScore; got != want {
+				t.Errorf("%s score = %d, want %d", ev.ce.Type, got, want)
 			}
 		}
 	})
@@ -441,8 +632,8 @@ func TestIngestEventsCarryScores(t *testing.T) {
 			return len(derived) >= 2
 		})
 		for _, ev := range derived {
-			if got := eventScore(t, ev); got != derive.DefaultWeights.Direct+derive.DefaultWeights.Urgent {
-				t.Errorf("%s score = %d, want %d", ev.ce.Type, got, derive.DefaultWeights.Direct+derive.DefaultWeights.Urgent)
+			if got, want := eventScore(t, ev), requestedScore+derive.DefaultWeights.Urgent; got != want {
+				t.Errorf("%s score = %d, want %d", ev.ce.Type, got, want)
 			}
 		}
 	})

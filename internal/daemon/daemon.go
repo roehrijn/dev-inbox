@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -37,7 +39,7 @@ const (
 const (
 	metaBackfillDone       = "backfill_done"
 	metaViewer             = "viewer"
-	metaPreferredTeam      = "preferred_team"
+	metaPreferredTeams     = "preferred_teams"
 	metaNotificationsSince = "notifications_since"
 	metaLastModified       = "notifications_last_modified"
 )
@@ -46,15 +48,16 @@ const (
 var DefaultGreylist = []string{"dependabot", "renovate"}
 
 type Config struct {
-	StateDir          string         // default DefaultStateDir()
-	NATSHost          string         // default 127.0.0.1
-	NATSPort          int            // default 14222; -1 picks a random port
-	PollInterval      time.Duration  // minimum notifications poll interval, default 1m
-	ReconcileInterval time.Duration  // default 5m
-	Logger            *slog.Logger   // default slog.Default()
-	PreferredTeam     string         // "org/slug"; PRs of its members rank up, empty disables the feature
-	Greylist          []string       // used as given; callers wanting the defaults pass DefaultGreylist
-	Weights           derive.Weights // used as given; callers wanting the defaults pass derive.DefaultWeights
+	StateDir          string        // default DefaultStateDir()
+	NATSHost          string        // default 127.0.0.1
+	NATSPort          int           // default 14222; -1 picks a random port
+	PollInterval      time.Duration // minimum notifications poll interval, default 1m
+	ReconcileInterval time.Duration // default 5m
+	Logger            *slog.Logger  // default slog.Default()
+	// PreferredTeams maps "org/slug" to the points PRs of the team's members get; see derive.TeamBoost.
+	PreferredTeams map[string]int
+	Greylist       []string       // used as given; callers wanting the defaults pass DefaultGreylist
+	Weights        derive.Weights // used as given; callers wanting the defaults pass derive.DefaultWeights
 }
 
 // GitHub is the part of *github.Client the daemon uses.
@@ -85,6 +88,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	gh.SetLogger(cfg.Logger)
 	d, err := start(cfg, gh)
 	if err != nil {
 		return err
@@ -101,15 +105,12 @@ type daemon struct {
 	gate  *gate
 	queue *queue
 
-	mu               sync.RWMutex
-	viewer           model.Viewer
-	preferredMembers []string
-}
+	teams []string // configured preferred teams, sorted
 
-// cachedTeam is the persisted form of the preferred team's members.
-type cachedTeam struct {
-	Team    string   `json:"team"`
-	Members []string `json:"members"`
+	mu     sync.RWMutex
+	viewer model.Viewer
+	// teamMembers holds the known members by configured team; a team without an entry has none yet.
+	teamMembers map[string][]string
 }
 
 // start opens the store, starts the bus and serves the API. GitHub is not contacted yet.
@@ -162,12 +163,15 @@ func start(cfg Config, gh GitHub) (*daemon, error) {
 		bus:   b,
 		gate:  &gate{log: cfg.Logger},
 		queue: newQueue(),
+		teams: slices.Sorted(maps.Keys(cfg.PreferredTeams)),
+
+		teamMembers: map[string][]string{},
 	}
 	if err := d.loadCachedViewer(context.Background()); err != nil {
 		d.log.Warn("ignoring cached viewer", "err", err)
 	}
-	if err := d.loadCachedPreferredTeam(context.Background()); err != nil {
-		d.log.Warn("ignoring cached preferred team", "err", err)
+	if err := d.loadCachedTeams(context.Background()); err != nil {
+		d.log.Warn("ignoring cached preferred teams", "teams", d.teams, "err", err)
 	}
 	if err := d.serveAPI(); err != nil {
 		d.close()
@@ -200,10 +204,10 @@ func (d *daemon) run(ctx context.Context) error {
 	}
 
 	var wg sync.WaitGroup
-	if d.cfg.PreferredTeam != "" {
+	if len(d.teams) > 0 {
 		// Fetched before the worker starts so that the first ingested events carry the final score.
-		wait := d.refreshPreferredTeam(ctx)
-		wg.Go(func() { d.preferredTeamLoop(ctx, wait) })
+		wait := d.refreshTeams(ctx)
+		wg.Go(func() { d.teamsLoop(ctx, wait) })
 	}
 	for _, loop := range []func(context.Context){
 		d.worker,
@@ -245,22 +249,26 @@ func (d *daemon) setViewer(v model.Viewer) {
 func (d *daemon) inputs(annotations []model.Annotation) derive.Inputs {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
+	teams := make([]derive.TeamBoost, 0, len(d.teams))
+	for _, team := range d.teams {
+		teams = append(teams, derive.TeamBoost{Team: team, Points: d.cfg.PreferredTeams[team], Members: d.teamMembers[team]})
+	}
 	return derive.Inputs{
 		Viewer: d.viewer,
 		Priority: derive.Priority{
-			PreferredTeam:    d.cfg.PreferredTeam,
-			PreferredMembers: d.preferredMembers,
-			Greylist:         d.cfg.Greylist,
-			Weights:          d.cfg.Weights,
+			Teams:    teams,
+			Greylist: d.cfg.Greylist,
+			Weights:  d.cfg.Weights,
 		},
 		Annotations: annotations,
+		Now:         time.Now(),
 	}
 }
 
-func (d *daemon) setPreferredMembers(members []string) {
+func (d *daemon) setTeamMembers(team string, members []string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.preferredMembers = members
+	d.teamMembers[team] = members
 }
 
 func (d *daemon) loadCachedViewer(ctx context.Context) error {
@@ -322,56 +330,70 @@ func (d *daemon) viewerLoop(ctx context.Context) {
 	}
 }
 
-// loadCachedPreferredTeam restores the members of the configured team, so that a start without
-// GitHub still ranks PRs. A cache of another team is ignored.
-func (d *daemon) loadCachedPreferredTeam(ctx context.Context) error {
-	if d.cfg.PreferredTeam == "" {
+// loadCachedTeams restores the members of the configured teams, so that a start without GitHub still
+// ranks PRs. Cached teams that are no longer configured are ignored.
+func (d *daemon) loadCachedTeams(ctx context.Context) error {
+	if len(d.teams) == 0 {
 		return nil
 	}
-	raw, ok, err := d.store.Meta(ctx, metaPreferredTeam)
+	raw, ok, err := d.store.Meta(ctx, metaPreferredTeams)
 	if err != nil || !ok {
 		return err
 	}
-	var c cachedTeam
-	if err := json.Unmarshal([]byte(raw), &c); err != nil {
-		return fmt.Errorf("decode cached preferred team: %w", err)
+	var cached map[string][]string
+	if err := json.Unmarshal([]byte(raw), &cached); err != nil {
+		return fmt.Errorf("decode cached preferred teams: %w", err)
 	}
-	if strings.EqualFold(c.Team, d.cfg.PreferredTeam) {
-		d.setPreferredMembers(c.Members)
+	for _, team := range d.teams {
+		for name, members := range cached {
+			if strings.EqualFold(name, team) {
+				d.setTeamMembers(team, members)
+			}
+		}
 	}
 	return nil
 }
 
-// refreshPreferredTeam fetches the members of the preferred team and caches them. It logs failures
-// and returns how long to wait before the next refresh. A failed fetch keeps the previous members.
-func (d *daemon) refreshPreferredTeam(ctx context.Context) time.Duration {
-	team := d.cfg.PreferredTeam
-	members, err := call(ctx, d.gate, func() ([]string, error) { return d.gh.TeamMembers(ctx, team) })
-	switch {
-	case errors.Is(err, github.ErrNotFound):
-		d.log.Warn("preferred team not found or not accessible, ranking without it", "team", team, "err", err)
-		members = nil
-	case err != nil:
-		if ctx.Err() == nil {
+// refreshTeams fetches the members of every preferred team and caches them. It logs failures and
+// returns how long to wait before the next refresh. A team whose fetch failed keeps its previous
+// members, and the refresh is retried soon.
+func (d *daemon) refreshTeams(ctx context.Context) time.Duration {
+	wait := viewerRefreshInterval
+	for _, team := range d.teams {
+		members, err := call(ctx, d.gate, func() ([]string, error) { return d.gh.TeamMembers(ctx, team) })
+		switch {
+		case ctx.Err() != nil:
+			return wait
+		case errors.Is(err, github.ErrNotFound):
+			d.log.Warn("preferred team not found or not accessible, ranking without it", "team", team, "err", err)
+			members = nil
+		case err != nil:
 			d.log.Warn("preferred team refresh failed", "team", team, "err", err, "in", retryInterval)
+			wait = retryInterval
+			continue
 		}
-		return retryInterval
+		d.setTeamMembers(team, members)
 	}
-	d.setPreferredMembers(members)
-	raw, err := json.Marshal(cachedTeam{Team: team, Members: members})
-	if err == nil {
-		err = d.store.SetMeta(ctx, metaPreferredTeam, string(raw))
-	}
-	if err != nil && ctx.Err() == nil {
-		d.log.Warn("cache preferred team", "team", team, "err", err)
-	}
-	return viewerRefreshInterval
+	d.cacheTeams(ctx)
+	return wait
 }
 
-// preferredTeamLoop refreshes the preferred team after wait and then at the pace refreshPreferredTeam asks for.
-func (d *daemon) preferredTeamLoop(ctx context.Context, wait time.Duration) {
+func (d *daemon) cacheTeams(ctx context.Context) {
+	d.mu.RLock()
+	raw, err := json.Marshal(d.teamMembers)
+	d.mu.RUnlock()
+	if err == nil {
+		err = d.store.SetMeta(ctx, metaPreferredTeams, string(raw))
+	}
+	if err != nil && ctx.Err() == nil {
+		d.log.Warn("cache preferred teams", "teams", d.teams, "err", err)
+	}
+}
+
+// teamsLoop refreshes the preferred teams after wait and then at the pace refreshTeams asks for.
+func (d *daemon) teamsLoop(ctx context.Context, wait time.Duration) {
 	for sleep(ctx, wait) {
-		wait = d.refreshPreferredTeam(ctx)
+		wait = d.refreshTeams(ctx)
 	}
 }
 

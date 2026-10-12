@@ -72,6 +72,7 @@ type PR struct {
 	CreatedAt      time.Time       `json:"createdAt"`
 	LastPushAt     time.Time       `json:"lastPushAt"` // best effort: committed date of the head commit
 	ReviewRequests []ReviewRequest `json:"reviewRequests,omitempty"`
+	ReviewThreads  []ReviewThread  `json:"reviewThreads,omitempty"`
 	Reviews        []Review        `json:"reviews,omitempty"` // submitted reviews, oldest first
 	CheckRuns      []CheckRun      `json:"checkRuns,omitempty"`
 	Comments       []Comment       `json:"comments,omitempty"` // oldest first; only the most recent ones are fetched
@@ -89,6 +90,14 @@ type Review struct {
 	Author      string    `json:"author"`
 	State       string    `json:"state"` // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED
 	SubmittedAt time.Time `json:"submittedAt"`
+	CommitSHA   string    `json:"commitSha,omitempty"` // commit the review was made on; empty when unknown
+}
+
+// ReviewThread is a diff review thread; its comments carry its ID in Comment.ThreadID.
+type ReviewThread struct {
+	ID         string `json:"id"`
+	IsResolved bool   `json:"isResolved"`
+	ResolvedBy string `json:"resolvedBy,omitempty"`
 }
 
 type CheckRun struct {
@@ -114,8 +123,13 @@ type Comment struct {
 	URL       string      `json:"url"`
 	Path      string      `json:"path,omitempty"`
 	Line      int         `json:"line,omitempty"`
-	ReplyTo   string      `json:"replyTo,omitempty"` // node ID of the inline comment this one replies to
-	CreatedAt time.Time   `json:"createdAt"`
+	ReplyTo   string      `json:"replyTo,omitempty"`   // node ID of the inline comment this one replies to
+	ThreadID  string      `json:"threadId,omitempty"`  // review thread of an inline comment
+	CommitSHA string      `json:"commitSha,omitempty"` // commit an inline comment was made on; empty when unknown
+	// ViewerReactions lists the reactions the viewer left on this comment, as GitHub ReactionContent
+	// values (THUMBS_UP, HEART, ...).
+	ViewerReactions []string  `json:"viewerReactions,omitempty"`
+	CreatedAt       time.Time `json:"createdAt"`
 }
 
 type Viewer struct {
@@ -149,10 +163,25 @@ type Classification struct {
 	Section Section `json:"section"`
 	// Direct is true when review is requested from the viewer personally rather than via a team.
 	Direct bool `json:"direct,omitempty"`
-	// Reasons explains needs_action, e.g. "checks failing", "changes requested", "merge conflict", "new comments".
+	// Reasons explains needs_action for own PRs ("checks failing", "merge conflict", ...) and the
+	// attention reasons for foreign PRs ("review requested", "changes since your review", ...).
 	Reasons []string `json:"reasons,omitempty"`
 	// Score is the priority inside a section; higher sorts first. See derive.Score.
 	Score int `json:"score"`
+	// ScoreTerms are the non-zero contributions to Score, in evaluation order; they sum to Score.
+	ScoreTerms []ScoreTerm `json:"scoreTerms,omitempty"`
+	// NeedsMe is true for a foreign PR with at least one attention reason in Reasons. Such PRs are
+	// never hidden by the TUI.
+	NeedsMe bool `json:"needsMe,omitempty"`
+	// Hidden is true when the viewer hid the PR and nothing new happened in it since; see
+	// derive.HiddenKey.
+	Hidden bool `json:"hidden,omitempty"`
+}
+
+// ScoreTerm is one contribution to Classification.Score.
+type ScoreTerm struct {
+	Term   string `json:"term"` // e.g. "merge conflict", "team acme-co/web-platform-core", "jev.attention"
+	Points int    `json:"points"`
 }
 
 // Annotation is enrichment data attached by a workflow to a PR or, with CommentID set, to one of its comments.

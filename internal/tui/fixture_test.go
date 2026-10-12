@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ func prKey(owner, repo string, n int) model.PRKey {
 	return model.PRKey{Owner: owner, Repo: repo, Number: n}
 }
 
+// item is a PR in sec. PRs of others need the viewer, so the default view lists them.
 func item(k model.PRKey, sec model.Section, title string, updatedAgo time.Duration) api.InboxItem {
 	return api.InboxItem{
 		PR: model.PR{
@@ -32,7 +34,7 @@ func item(k model.PRKey, sec model.Section, title string, updatedAgo time.Durati
 			URL:      "https://github.com/" + k.Owner + "/" + k.Repo + "/pull/" + strconv.Itoa(k.Number),
 			PRStatus: model.PRStatus{State: model.PRStateOpen, UpdatedAt: testNow.Add(-updatedAgo)},
 		},
-		Classification: model.Classification{Section: sec},
+		Classification: model.Classification{Section: sec, NeedsMe: sectionTab[sec] == tabOthers},
 	}
 }
 
@@ -81,6 +83,23 @@ type fakeBackend struct {
 	listCalls int
 	details   map[model.PRKey]api.InboxItem
 	gets      []model.PRKey
+	plugins   []string
+	pings     int
+	annotated []model.Annotation
+	annErr    error
+}
+
+func (f *fakeBackend) Annotate(_ context.Context, a model.Annotation) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.annotated = append(f.annotated, a)
+	return f.annErr
+}
+
+func (f *fakeBackend) annotations() []model.Annotation {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.annotated)
 }
 
 func (f *fakeBackend) List(context.Context) (api.ListResponse, error) {
@@ -99,6 +118,19 @@ func (f *fakeBackend) Get(_ context.Context, k model.PRKey) (api.GetResponse, er
 		return api.GetResponse{}, errors.New(k.String() + " not found")
 	}
 	return api.GetResponse{Item: &it}, nil
+}
+
+func (f *fakeBackend) Plugins(context.Context) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pings++
+	return f.plugins
+}
+
+func (f *fakeBackend) pingCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pings
 }
 
 func (f *fakeBackend) calls() (int, []model.PRKey) {

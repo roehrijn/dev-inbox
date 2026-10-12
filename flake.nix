@@ -19,8 +19,11 @@
           pname = "dev-inbox";
           version = "0.1.0";
           src = ./.;
-          subPackages = [ "cmd/dev-inbox" ];
-          vendorHash = "sha256-izknVeZJLkzzzaL+7tBQxmUo9Kjgjl+3EQdac3HjSAY=";
+          subPackages = [
+            "cmd/dev-inbox"
+            "cmd/dev-inbox-jev"
+          ];
+          vendorHash = "sha256-wRgpU3YxqPnU319C1Zown338QtQ2ocnjx83GuO+ONKs=";
           env.CGO_ENABLED = "0";
           ldflags = [
             "-s"

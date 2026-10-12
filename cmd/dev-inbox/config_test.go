@@ -22,17 +22,24 @@ serve:
   poll-interval: 2m
   reconcile-interval: 30s
   log-level: warn
-  preferred-team: acme/file-team
+  preferred-teams:
+    acme/file-team: 25
+    acme/other: -5
   greylist: [bot-a, bot-b]
   score:
     urgent: 1
-    preferred-team: 2
     greylist: 3
     direct: 4
     checks-running: 5
     checks-success: 6
     per-failing-check: 7
     merge-conflict: 8
+    needs-me: 9
+    rereview: 10
+    thread-reply: 11
+    mentioned: 12
+    team-review: 13
+    draft: 14
 `
 
 func fileServeConfig() daemon.Config {
@@ -42,11 +49,11 @@ func fileServeConfig() daemon.Config {
 		NATSPort:          4222,
 		PollInterval:      2 * time.Minute,
 		ReconcileInterval: 30 * time.Second,
-		PreferredTeam:     "acme/file-team",
+		PreferredTeams:    map[string]int{"acme/file-team": 25, "acme/other": -5},
 		Greylist:          []string{"bot-a", "bot-b"},
 		Weights: derive.Weights{
-			Urgent: 1, PreferredTeam: 2, Greylist: 3, Direct: 4, ChecksRunning: 5, ChecksSuccess: 6, PerFailingCheck: 7,
-			MergeConflict: 8,
+			Urgent: 1, Greylist: 3, Direct: 4, ChecksRunning: 5, ChecksSuccess: 6, PerFailingCheck: 7,
+			MergeConflict: 8, NeedsMe: 9, Rereview: 10, ThreadReply: 11, Mentioned: 12, TeamReview: 13, Draft: 14,
 		},
 	}
 }
@@ -80,11 +87,11 @@ func TestServePrecedence(t *testing.T) {
 			name: "flags over file",
 			file: fullServeFile,
 			args: []string{"--nats-port", "5555", "--poll-interval", "10m", "--greylist", "x",
-				"--preferred-team", "acme/flag-team", "--state-dir", "/flag/state"},
+				"--preferred-teams", "acme/flag-team=7", "--state-dir", "/flag/state"},
 			want: func() daemon.Config {
 				c := fileServeConfig()
 				c.NATSPort, c.PollInterval, c.Greylist = 5555, 10*time.Minute, []string{"x"}
-				c.PreferredTeam, c.StateDir = "acme/flag-team", "/flag/state"
+				c.PreferredTeams, c.StateDir = map[string]int{"acme/flag-team": 7}, "/flag/state"
 				return c
 			},
 		},
@@ -202,6 +209,54 @@ func TestEmptyGreylist(t *testing.T) {
 	}
 }
 
+func TestPreferredTeams(t *testing.T) {
+	const file = "serve:\n  preferred-teams:\n    acme/file-a: 30\n    acme/file-b: 10\n"
+	tests := []struct {
+		name string
+		file string
+		args []string
+		want map[string]int
+	}{
+		{name: "none", want: nil},
+		{name: "file alone", file: file, want: map[string]int{"acme/file-a": 30, "acme/file-b": 10}},
+		{name: "empty map in the file", file: "serve:\n  preferred-teams: {}\n", want: nil},
+		{name: "flow style in the file", file: "serve: {preferred-teams: {acme/x: 5}}\n",
+			want: map[string]int{"acme/x": 5}},
+		{name: "negative points in the file", file: "serve:\n  preferred-teams:\n    acme/x: -20\n",
+			want: map[string]int{"acme/x": -20}},
+		{name: "file keys are lowercased by viper", file: "serve:\n  preferred-teams:\n    Acme/Eng-Team: 3\n",
+			want: map[string]int{"acme/eng-team": 3}},
+		{name: "flag replaces the file map", file: file, args: []string{"--preferred-teams", "acme/flag=7"},
+			want: map[string]int{"acme/flag": 7}},
+		{name: "repeated flag merges and still replaces the file map", file: file,
+			args: []string{"--preferred-teams", "acme/flag-a=7", "--preferred-teams", "acme/flag-b=8"},
+			want: map[string]int{"acme/flag-a": 7, "acme/flag-b": 8}},
+		{name: "flag over a file without teams", file: "serve:\n  nats-port: 4222\n",
+			args: []string{"--preferred-teams", "acme/flag=7"}, want: map[string]int{"acme/flag": 7}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setupEnv(t)
+			args := []string{"serve"}
+			if tt.file != "" {
+				args = append(args, "--config", writeConfig(t, tt.file))
+			}
+			res := runCLI(t, append(args, tt.args...)...)
+			if res.err != nil || res.serve == nil {
+				t.Fatalf("err = %v", res.err)
+			}
+			want := defaultServeConfig()
+			want.PreferredTeams = tt.want
+			if tt.file == "serve:\n  nats-port: 4222\n" {
+				want.NATSPort = 4222
+			}
+			if !sameConfig(*res.serve, want) {
+				t.Errorf("config = %+v, want %+v", *res.serve, want)
+			}
+		})
+	}
+}
+
 func TestConfigFileLocation(t *testing.T) {
 	t.Run("missing default file is fine", func(t *testing.T) {
 		setupEnv(t)
@@ -294,19 +349,37 @@ func TestConfigFileErrors(t *testing.T) {
 		{"score key in the tui section", "tui:\n  score:\n    urgent: 1\n", `unknown key "tui.score.urgent"`},
 		{"score is a scalar", "serve:\n  score: 5\n", "invalid config"},
 		{"score is a list", "serve:\n  score: [1]\n", "invalid config"},
+		{"preferred-teams is a scalar", "serve:\n  preferred-teams: acme/x\n", "invalid config"},
+		{"preferred-teams is a list", "serve:\n  preferred-teams: [acme/x]\n", "invalid config"},
+		{"old preferred-team key", "serve:\n  preferred-team: acme/x\n",
+			`unknown key "serve.preferred-team": replaced by serve.preferred-teams (org/slug: points)`},
+		{"old preferred-team score key", "serve:\n  score:\n    preferred-team: 30\n",
+			`unknown key "serve.score.preferred-team": replaced by serve.preferred-teams (org/slug: points)`},
+		{"preferred-team in the tui section", "tui:\n  preferred-team: acme/x\n", `unknown key "tui.preferred-team"`},
+		{"preferred-teams in the tui section", "tui:\n  preferred-teams: {acme/x: 1}\n",
+			`unknown key "tui.preferred-teams.acme/x"`},
 	}
 	serveOnly := []fileError{
 		{"duration without unit", "serve:\n  poll-interval: 60\n", "invalid poll-interval"},
 		{"invalid duration", "serve:\n  reconcile-interval: soon\n", "invalid reconcile-interval"},
 		{"invalid log level", "serve:\n  log-level: loud\n", "invalid log-level"},
-		{"invalid team", "serve:\n  preferred-team: control-plane\n", "invalid preferred-team"},
+		{"team without org", "serve:\n  preferred-teams:\n    control-plane: 1\n", `invalid preferred-teams: "control-plane"`},
+		{"team without slug", "serve:\n  preferred-teams:\n    acme/: 1\n", `invalid preferred-teams: "acme/"`},
+		{"team with extra segment", "serve:\n  preferred-teams:\n    acme/a/b: 1\n", `invalid preferred-teams: "acme/a/b"`},
+		{"one invalid team among valid ones", "serve:\n  preferred-teams:\n    acme/ok: 1\n    nope: 2\n",
+			`invalid preferred-teams: "nope"`},
+		{"fractional points", "serve:\n  preferred-teams:\n    acme/x: 1.5\n", "invalid preferred-teams acme/x: points 1.5"},
+		{"quoted points", "serve:\n  preferred-teams:\n    acme/x: '20'\n", "invalid preferred-teams acme/x: points 20"},
+		{"null points", "serve:\n  preferred-teams:\n    acme/x:\n", "invalid preferred-teams acme/x"},
+		{"boolean points", "serve:\n  preferred-teams:\n    acme/x: true\n", "invalid preferred-teams acme/x: points true"},
+		{"huge points", "serve:\n  preferred-teams:\n    acme/x: 99999999999999999999\n", "invalid preferred-teams acme/x"},
 		{"blank greylist login", "serve:\n  greylist: [a, ' ']\n", "invalid greylist"},
 		{"fractional score", "serve:\n  score:\n    urgent: 1.5\n", "invalid serve.score.urgent 1.5"},
 		{"whole float score", "serve:\n  score:\n    direct: 10.0\n", "invalid serve.score.direct"},
 		{"quoted score", "serve:\n  score:\n    greylist: '-15'\n", "invalid serve.score.greylist"},
 		{"word score", "serve:\n  score:\n    checks-running: many\n", "invalid serve.score.checks-running many"},
 		{"boolean score", "serve:\n  score:\n    checks-success: true\n", "invalid serve.score.checks-success"},
-		{"list score", "serve:\n  score:\n    preferred-team: [1]\n", "invalid serve.score.preferred-team"},
+		{"list score", "serve:\n  score:\n    urgent: [1]\n", "invalid serve.score.urgent"},
 		{"huge score", "serve:\n  score:\n    per-failing-check: 99999999999999999999\n",
 			"invalid serve.score.per-failing-check"},
 	}
@@ -353,6 +426,62 @@ func TestInvalidDefaultFileIsAnError(t *testing.T) {
 	}
 }
 
+func TestPluginsNamespace(t *testing.T) {
+	const plugins = "plugins:\n  jev:\n    repos: [acme-co/frontend]\n    threshold: 0.6\n    nested: {a: [1, x]}\n" +
+		"  other: 5\n"
+	t.Run("is ignored by both commands", func(t *testing.T) {
+		setupEnv(t)
+		path := writeConfig(t, plugins+"serve:\n  nats-port: 4222\ntui:\n  nats-url: nats://file:1\n")
+		serve := runCLI(t, "serve", "--config", path)
+		want := defaultServeConfig()
+		want.NATSPort = 4222
+		if serve.err != nil || !sameConfig(*serve.serve, want) {
+			t.Errorf("serve config = %+v, err = %v; want %+v", serve.serve, serve.err, want)
+		}
+		tui := runCLI(t, "--config", path)
+		if tui.err != nil || *tui.tuiURL != "nats://file:1" {
+			t.Errorf("tui url = %v, err = %v; want nats://file:1", tui.tuiURL, tui.err)
+		}
+	})
+	t.Run("content is not validated", func(t *testing.T) {
+		for _, file := range []string{
+			"plugins:\n",
+			"plugins: {}\n",
+			"plugins:\n  jev: loud\n",
+			"plugins:\n  jev: [1, 2]\n",
+			"plugins:\n  jev:\n    nats-prot: 1\n    score: {urgnt: 1}\n",
+		} {
+			setupEnv(t)
+			if res := runCLI(t, "serve", "--config", writeConfig(t, file)); res.err != nil {
+				t.Errorf("config %q: err = %v", file, res.err)
+			}
+		}
+	})
+	t.Run("does not excuse unknown keys elsewhere", func(t *testing.T) {
+		for _, tt := range []struct{ file, key string }{
+			{plugins + "serve:\n  nats-prot: 1\n", "serve.nats-prot"},
+			{plugins + "tui:\n  nats-urls: x\n", "tui.nats-urls"},
+			{plugins + "serve:\n  plugins:\n    jev: 1\n", "serve.plugins.jev"},
+			{plugins + "pluginsx: 1\n", "pluginsx"},
+			{plugins + "plugin:\n  jev: 1\n", "plugin.jev"},
+		} {
+			setupEnv(t)
+			res := runCLI(t, "serve", "--config", writeConfig(t, tt.file))
+			if !isUsage(res.err) || !strings.Contains(res.err.Error(), `unknown key "`+tt.key+`"`) || res.serve != nil {
+				t.Errorf("config %q: err = %v, want a usage error naming %s", tt.file, res.err, tt.key)
+			}
+		}
+	})
+	t.Run("must be a mapping", func(t *testing.T) {
+		for _, file := range []string{"plugins: 5\n", "plugins: [jev]\n"} {
+			setupEnv(t)
+			if res := runCLI(t, "serve", "--config", writeConfig(t, file)); !isUsage(res.err) {
+				t.Errorf("config %q: err = %v, want a usage error", file, res.err)
+			}
+		}
+	})
+}
+
 func TestStateDirHomeExpansion(t *testing.T) {
 	home := setupEnv(t)
 	tests := []struct {
@@ -388,6 +517,11 @@ func TestConfigCreate(t *testing.T) {
 	}
 	out := res.stdout
 
+	wantTeams := "\n#   # Rank PRs of members of these GitHub teams by org/slug=points; repeatable, replaces the config " +
+		"file's teams; negative points rank down\n#   preferred-teams: {}\n"
+	if !strings.Contains(out, wantTeams) {
+		t.Errorf("output lacks\n%s\nin\n%s", wantTeams, out)
+	}
 	if want := "\n#   # Listen port of the embedded NATS server\n#   nats-port: 14222\n"; !strings.Contains(out, want) {
 		t.Errorf("output lacks\n%s\nin\n%s", want, out)
 	}
@@ -432,6 +566,9 @@ func TestConfigCreateRoundTrip(t *testing.T) {
 					}
 				}
 			}
+			if teams, ok := doc[serveSection.name][preferredTeamsKey].(map[string]any); !ok || len(teams) != 0 {
+				t.Errorf("uncommented preferred-teams = %#v, want an empty map", doc[serveSection.name][preferredTeamsKey])
+			}
 			score, _ := doc[serveSection.name][scoreKey].(map[string]any)
 			for _, term := range scoreTerms {
 				if _, ok := score[term.key]; !ok {
@@ -450,12 +587,14 @@ func TestConfigCreateRoundTrip(t *testing.T) {
 			}
 
 			// The template is read, not merely accepted.
-			edited := strings.Replace(uncommented, "nats-port: 14222", "nats-port: 5555", 1)
+			edited := strings.Replace(uncommented, "preferred-teams: {}", "preferred-teams: {acme/x: 4, acme/y: -2}", 1)
+			edited = strings.Replace(edited, "nats-port: 14222", "nats-port: 5555", 1)
 			edited = strings.Replace(edited, "greylist: [dependabot, renovate]", "greylist: []", 1)
 			edited = strings.Replace(edited, "urgent: 20", "urgent: 0", 1)
 			edited = strings.Replace(edited, "per-failing-check: -10", "per-failing-check: -3", 1)
 			serve = runCLI(t, "serve", "--config", writeConfig(t, edited))
 			want.NATSPort, want.Greylist = 5555, nil
+			want.PreferredTeams = map[string]int{"acme/x": 4, "acme/y": -2}
 			want.Weights.Urgent, want.Weights.PerFailingCheck = 0, -3
 			if serve.err != nil || !sameConfig(*serve.serve, want) {
 				t.Errorf("edited serve config = %+v, err = %v; want %+v", serve.serve, serve.err, want)

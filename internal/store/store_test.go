@@ -612,13 +612,17 @@ func TestAnnotationLevels(t *testing.T) {
 	prB := newAnnotation(keyA, "", "b", `{"badge":"B"}`)
 	prD := newAnnotation(keyB, "", "d", `4`)
 
-	t.Run("AllAnnotations returns PR-level only", func(t *testing.T) {
-		got, err := s.AllAnnotations(ctx)
+	t.Run("AnnotationsByPR returns both levels grouped by PR", func(t *testing.T) {
+		got, err := s.AnnotationsByPR(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		equal(t, "AllAnnotations", got, map[model.PRKey][]model.Annotation{
-			keyA: {prA, prB},
+		equal(t, "AnnotationsByPR", got, map[model.PRKey][]model.Annotation{
+			keyA: {
+				prA, prB,
+				newAnnotation(keyA, "c0", "z", `"on c0"`),
+				newAnnotation(keyA, "c1", "a", `"on c1"`),
+			},
 			keyB: {prD},
 		})
 	})

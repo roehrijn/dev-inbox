@@ -155,6 +155,9 @@ func (a *app) renderTabs() string {
 			if a.loaded {
 				label += " " + strconv.Itoa(a.tabCount(i))
 			}
+			if i == tabOthers {
+				label += " · " + a.viewName()
+			}
 			st := a.st.muted
 			if i == a.tab {
 				st = a.st.tabActive
@@ -242,7 +245,8 @@ func (a *app) listLines(w int) []string {
 			lines = append(lines, l1, l2)
 		}
 	}
-	if a.tabCount(a.tab) == 0 {
+	// Not tabCount: PRs hidden until new activity are left out of it but still listed.
+	if len(a.entries()) == 0 {
 		lines = append(lines, "", "  "+a.st.muted.Render(tabDefs[a.tab].empty))
 	}
 	return lines
@@ -293,7 +297,11 @@ func (a *app) renderRow(it api.InboxItem, selected bool, w int) (string, string)
 
 	tail := a.renderTail(it, avail/2)
 	tw := ansi.StringWidth(tail)
-	titleW := avail
+	var mark string
+	if pr.IsDraft {
+		mark = a.st.draft.Render("◌") + " "
+	}
+	titleW := avail - ansi.StringWidth(mark)
 	if tw > 0 {
 		titleW -= tw + 1
 	}
@@ -305,7 +313,7 @@ func (a *app) renderRow(it api.InboxItem, selected bool, w int) (string, string)
 	if selected {
 		ts = a.st.accentBold
 	}
-	t := ts.Render(ansi.Truncate(title, max(titleW, 0), "…"))
+	t := mark + ts.Render(ansi.Truncate(title, max(titleW, 0), "…"))
 	line1 := prefix + t
 	if tw > 0 {
 		line1 += strings.Repeat(" ", max(avail-ansi.StringWidth(t)-tw, 1)) + tail
@@ -427,6 +435,9 @@ func (a *app) renderStatus() string {
 		}
 		left = append(left, a.st.muted.Render("refreshed "+a.refreshedAt.Local().Format(time.TimeOnly)))
 	}
+	if len(a.plugins) > 0 {
+		left = append(left, a.renderPlugins())
+	}
 
 	right := a.st.muted.Render("? help")
 	if a.flash != "" {
@@ -444,6 +455,14 @@ func (a *app) renderStatus() string {
 	l := ansi.Truncate(" "+strings.Join(left, sep), max(room, 0), "…")
 	gap := max(a.width-ansi.StringWidth(l)-ansi.StringWidth(right)-1, 1)
 	return ansi.Truncate(l+strings.Repeat(" ", gap)+right+" ", a.width, "")
+}
+
+func (a *app) renderPlugins() string {
+	names := make([]string, len(a.plugins))
+	for i, n := range a.plugins {
+		names[i] = a.st.muted.Render(n) + " " + a.st.success.Render("●")
+	}
+	return strings.Join(names, "  ")
 }
 
 func plural(n int, noun string) string {

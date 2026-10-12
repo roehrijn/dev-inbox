@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -13,6 +14,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/roehrijn/dev-inbox/internal/api"
+	"github.com/roehrijn/dev-inbox/internal/derive"
 	"github.com/roehrijn/dev-inbox/internal/model"
 )
 
@@ -208,6 +210,7 @@ func (a *app) renderPR(it api.InboxItem, full bool, loadErr error, w int) string
 	for _, c := range pr.Comments {
 		commentIDs[c.ID] = true
 	}
+	a.writeScore(&b, it, w)
 	a.writeAnnotations(&b, it.Annotations, commentIDs, w)
 	a.writeChecks(&b, pr, w)
 	a.writeReviews(&b, pr, w)
@@ -250,11 +253,42 @@ func (a *app) writeHeading(b *strings.Builder, title, summary string) {
 	b.WriteByte('\n')
 }
 
-// writeAnnotations lists PR-level annotations and those of comments that are not shown.
+// writeScore lists the terms the score is made of, one line each with the signed points in a
+// right-aligned column. Labels are truncated so a line never exceeds w.
+func (a *app) writeScore(b *strings.Builder, it api.InboxItem, w int) {
+	if len(it.ScoreTerms) == 0 {
+		return
+	}
+	a.writeHeading(b, "Score", strconv.Itoa(it.Score))
+	labelW, pointsW := 0, 0
+	points := make([]string, len(it.ScoreTerms))
+	for i, t := range it.ScoreTerms {
+		points[i] = fmt.Sprintf("%+d", t.Points)
+		labelW = max(labelW, ansi.StringWidth(t.Term))
+		pointsW = max(pointsW, len(points[i]))
+	}
+	const indent, gap = 2, 2
+	labelW = max(0, min(labelW, w-indent-gap-pointsW))
+	for i, t := range it.ScoreTerms {
+		label := ansi.Truncate(t.Term, labelW, "…")
+		pad := strings.Repeat(" ", labelW-ansi.StringWidth(label)+gap+pointsW-len(points[i]))
+		st := a.st.muted
+		if t.Points > 0 {
+			st = a.st.accent
+		}
+		line := strings.Repeat(" ", indent) + a.st.text.Render(label) + pad + st.Render(points[i])
+		b.WriteString(ansi.Truncate(line, w, "") + "\n")
+	}
+}
+
+// writeAnnotations lists PR-level annotations and those of comments that are not shown. The
+// hidden mark is left out: the section already says the PR is hidden, its value is bookkeeping.
 func (a *app) writeAnnotations(b *strings.Builder, anns []model.Annotation, shownComments map[string]bool, w int) {
 	var list []model.Annotation
 	for _, ann := range anns {
-		if ann.CommentID == "" || !shownComments[ann.CommentID] {
+		switch {
+		case ann.CommentID == "" && ann.Key == derive.HiddenKey:
+		case ann.CommentID == "" || !shownComments[ann.CommentID]:
 			list = append(list, ann)
 		}
 	}

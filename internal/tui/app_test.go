@@ -37,14 +37,14 @@ func TestGroupItems(t *testing.T) {
 		item(k(7), "bogus", "unknown section", time.Minute),
 		item(k(8), model.SectionNeedsAction, "needs action", time.Minute),
 	}
-	secs := groupItems(items)
+	secs := groupItems(items, true)
 
 	var ids []model.Section
 	for _, s := range secs {
 		ids = append(ids, s.id)
 	}
-	if !slices.Equal(ids, model.Sections) {
-		t.Fatalf("sections = %v, want %v", ids, model.Sections)
+	if !slices.Equal(ids, displaySections) {
+		t.Fatalf("sections = %v, want %v", ids, displaySections)
 	}
 	got := sectionKeys(secs)
 	want := map[model.Section][]string{
@@ -105,7 +105,7 @@ func TestGroupItemsOrdersByScoreThenUpdatedAt(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := sectionKeys(groupItems(tt.items))[model.SectionNeedsAction]
+			got := sectionKeys(groupItems(tt.items, false))[model.SectionNeedsAction]
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("order = %v, want %v", got, tt.want)
 			}

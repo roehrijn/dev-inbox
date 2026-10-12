@@ -12,11 +12,21 @@ import (
 	"github.com/roehrijn/dev-inbox/internal/model"
 )
 
-// scoredItem is o/r#n in sec, titled "PR n", with the given score and age.
+// scoredItem is o/r#n in sec, titled "PR n", with the given score and age. A PR of others
+// does not need the viewer.
 func scoredItem(sec model.Section, n, score int, ago time.Duration) api.InboxItem {
 	it := item(prKey("o", "r", n), sec, "PR "+strconv.Itoa(n), ago)
 	it.Score = score
+	it.NeedsMe = false
 	return it
+}
+
+// allApp is loadedApp with the "all" view of the Others' PRs tab, on the My PRs tab.
+func allApp(t *testing.T, list api.ListResponse, w, h int) (*app, *fakeBackend) {
+	t.Helper()
+	a, fb := loadedApp(t, list, w, h)
+	press(t, a, "2", "a", "1")
+	return a, fb
 }
 
 func listOf(items ...api.InboxItem) api.ListResponse {
@@ -24,7 +34,8 @@ func listOf(items ...api.InboxItem) api.ListResponse {
 }
 
 // hiddenFixture has foreign PRs with a negative score (one a direct request), foreign PRs
-// at zero, and own PRs with a negative score. The others' tab lists 3 of 6 PRs, mine 2.
+// at zero, and own PRs with a negative score. The "all" view of the others' tab lists 3 of 6
+// PRs, mine 2.
 func hiddenFixture() api.ListResponse {
 	direct := scoredItem(model.SectionReviewRequested, 3, -5, 3*time.Hour)
 	direct.Direct = true
@@ -58,7 +69,7 @@ func TestGroupItemsHidesNegativeForeignPRs(t *testing.T) {
 		scoredItem(model.SectionDrafts, 7, -1, time.Hour),
 		scoredItem(model.SectionWaitingForReview, 8, -1, time.Hour),
 		scoredItem(model.SectionNone, 9, -1, time.Hour),
-	})
+	}, true)
 
 	want := map[model.Section][]string{
 		model.SectionReviewRequested:  {"o/r#1", "o/r#2"},
@@ -89,7 +100,7 @@ func TestGroupItemsHidesNegativeForeignPRs(t *testing.T) {
 
 func TestHiddenCountsAndHeaders(t *testing.T) {
 	for _, w := range []int{120, 60, 40} {
-		a, _ := loadedApp(t, hiddenFixture(), w, 30)
+		a, _ := allApp(t, hiddenFixture(), w, 30)
 
 		out := screen(a)
 		assertFits(t, out, w, 30)
@@ -111,7 +122,7 @@ func TestHiddenCountsAndHeaders(t *testing.T) {
 }
 
 func TestHiddenPRsStayInTheStatusTotal(t *testing.T) {
-	a, _ := loadedApp(t, hiddenFixture(), 120, 30)
+	a, _ := allApp(t, hiddenFixture(), 120, 30)
 	if got := a.total(); got != 8 {
 		t.Errorf("total = %d, want all 8 PRs", got)
 	}
@@ -121,7 +132,7 @@ func TestHiddenPRsStayInTheStatusTotal(t *testing.T) {
 }
 
 func TestHiddenPRsAreNotSelectable(t *testing.T) {
-	a, _ := loadedApp(t, hiddenFixture(), 120, 30)
+	a, _ := allApp(t, hiddenFixture(), 120, 30)
 	press(t, a, "2")
 	var seen []string
 	for range 10 {
@@ -151,7 +162,7 @@ func TestAllHiddenSection(t *testing.T) {
 		scoredItem(model.SectionInvolved, 3, -2, 2*time.Hour),
 	)
 	for _, w := range []int{120, 40} {
-		a, _ := loadedApp(t, list, w, 20)
+		a, _ := allApp(t, list, w, 20)
 		press(t, a, "2")
 		out := screen(a)
 		assertFits(t, out, w, 20)
@@ -172,7 +183,7 @@ func TestAllHiddenTab(t *testing.T) {
 		scoredItem(model.SectionInvolved, 2, -1, time.Hour),
 		scoredItem(model.SectionNeedsAction, 3, 0, time.Hour),
 	)
-	a, _ := loadedApp(t, list, 100, 20)
+	a, _ := allApp(t, list, 100, 20)
 	press(t, a, "2")
 	out := screen(a)
 	assertFits(t, out, 100, 20)
@@ -188,7 +199,7 @@ func TestSelectionLeavesNewlyHiddenPR(t *testing.T) {
 	rr := func(n, score int) api.InboxItem {
 		return scoredItem(model.SectionReviewRequested, n, score, time.Duration(n)*time.Hour)
 	}
-	a, fb := loadedApp(t, listOf(rr(1, 40), rr(2, 30), rr(3, 20), rr(4, 10)), 140, 30)
+	a, fb := allApp(t, listOf(rr(1, 40), rr(2, 30), rr(3, 20), rr(4, 10)), 140, 30)
 	for _, it := range fb.list.Items {
 		fb.details[it.PR.Key] = it
 	}
@@ -241,7 +252,7 @@ func TestSelectionMovesToNearestWhenSeveralPRsHide(t *testing.T) {
 	rr := func(n, score int) api.InboxItem {
 		return scoredItem(model.SectionReviewRequested, n, score, time.Duration(n)*time.Hour)
 	}
-	a, fb := loadedApp(t, listOf(rr(1, 50), rr(2, 40), rr(3, 30), rr(4, 20), rr(5, 10)), 100, 30)
+	a, fb := allApp(t, listOf(rr(1, 50), rr(2, 40), rr(3, 30), rr(4, 20), rr(5, 10)), 100, 30)
 	press(t, a, "2", "j", "j")
 	if got := selectedKey(t, a); got != "o/r#3" {
 		t.Fatalf("setup: selected %s", got)
@@ -261,7 +272,7 @@ func TestSelectionCrossesSectionWhenSectionHides(t *testing.T) {
 		scoredItem(model.SectionReviewRequested, 1, 5, time.Hour),
 		scoredItem(model.SectionInvolved, 2, 5, time.Hour),
 	)
-	a, fb := loadedApp(t, list, 100, 30)
+	a, fb := allApp(t, list, 100, 30)
 	press(t, a, "2")
 	if got := selectedKey(t, a); got != "o/r#1" {
 		t.Fatalf("setup: selected %s", got)

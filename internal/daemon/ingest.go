@@ -18,6 +18,9 @@ const (
 	itemTimeout = 2 * time.Minute
 	maxAttempts = 3
 	retryDelay  = 30 * time.Second
+	// needsMeRefetchCap bounds the extra fetches of PRs that need the viewer per reconcile, so that a
+	// large inbox cannot exhaust the rate limit.
+	needsMeRefetchCap = 30
 )
 
 var backfillQueries = []string{"involves:@me", "review-requested:@me", "reviewed-by:@me"}
@@ -264,7 +267,8 @@ func (d *daemon) reconcileLoop(ctx context.Context) {
 }
 
 // reconcile enqueues the open PRs whose cheap status differs from the stored snapshot, to catch
-// changes that come without a notification (CI, mergeability, merge queue).
+// changes that come without a notification (CI, mergeability, merge queue). It also refetches the PRs
+// that need the viewer, since reactions on comments change no timestamp and send no notification.
 func (d *daemon) reconcile(ctx context.Context) error {
 	prs, err := d.store.ListPRs(ctx, true)
 	if err != nil || len(prs) == 0 {
@@ -280,15 +284,44 @@ func (d *daemon) reconcile(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	changed := 0
+	queued := map[model.PRKey]bool{}
 	for _, pr := range prs {
 		if st, ok := statuses[pr.Key]; ok && !sameStatus(st, pr.PRStatus) {
 			d.queue.push(item{key: pr.Key})
-			changed++
+			queued[pr.Key] = true
 		}
 	}
-	d.log.Debug("reconciled", "prs", len(prs), "changed", changed)
+	changed := len(queued)
+	needsMe, overCap, err := d.enqueueNeedsMe(ctx, prs, queued)
+	if err != nil {
+		return err
+	}
+	d.log.Debug("reconciled", "prs", len(prs), "changed", changed, "needsMe", needsMe, "overCap", overCap)
 	return nil
+}
+
+// enqueueNeedsMe enqueues the PRs of prs that need the viewer and are not in queued yet, at most
+// needsMeRefetchCap of them. prs is ordered most recently updated first, so the cap keeps the freshest.
+// It returns how many PRs it enqueued and how many the cap left out.
+func (d *daemon) enqueueNeedsMe(ctx context.Context, prs []model.PR, queued map[model.PRKey]bool) (enqueued, overCap int, err error) {
+	annotations, err := d.store.AnnotationsByPR(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("load annotations: %w", err)
+	}
+	in := d.inputs(nil)
+	for _, pr := range prs {
+		in.Annotations = annotations[pr.Key]
+		if queued[pr.Key] || !derive.Evaluate(pr, in).NeedsMe {
+			continue
+		}
+		if enqueued == needsMeRefetchCap {
+			overCap++
+			continue
+		}
+		d.queue.push(item{key: pr.Key})
+		enqueued++
+	}
+	return enqueued, overCap, nil
 }
 
 // sameStatus compares statuses by instant rather than by time.Time representation, which differs

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"os/signal"
 	"slices"
@@ -21,6 +22,9 @@ import (
 	"github.com/roehrijn/dev-inbox/internal/daemon"
 	"github.com/roehrijn/dev-inbox/internal/tui"
 )
+
+// preferredTeamsKey is the flag and the serve key of the team score boosts.
+const preferredTeamsKey = "preferred-teams"
 
 // usageError reports invalid arguments, flags or configuration. It makes the process exit with status 2.
 type usageError struct{ error }
@@ -159,7 +163,8 @@ func defineServeFlags(fs *pflag.FlagSet) {
 	fs.Duration("reconcile-interval", daemon.DefaultReconcileInterval,
 		"Interval between status reconciliations of open PRs")
 	fs.String("log-level", "info", "Log level: debug, info, warn or error")
-	fs.String("preferred-team", "", "Rank PRs of this GitHub team's members up, as `org/slug`; empty disables")
+	fs.StringToInt(preferredTeamsKey, nil, "Rank PRs of members of these GitHub teams by `org/slug=points`; "+
+		"repeatable, replaces the config file's teams; negative points rank down")
 	fs.StringSlice("greylist", slices.Clone(daemon.DefaultGreylist),
 		"Rank PRs of this author `login` down, with or without a [bot] suffix; "+
 			"repeatable, the first use replaces the defaults, empty disables")
@@ -173,10 +178,9 @@ func serveConfig(cmd *cobra.Command) (daemon.Config, error) {
 	}
 	sv := s.Serve
 	cfg := daemon.Config{
-		NATSHost:      sv.NATSHost,
-		NATSPort:      sv.NATSPort,
-		PreferredTeam: sv.PreferredTeam,
-		Greylist:      sv.Greylist,
+		NATSHost: sv.NATSHost,
+		NATSPort: sv.NATSPort,
+		Greylist: sv.Greylist,
 	}
 	if cfg.StateDir, err = expandHome(sv.StateDir); err != nil {
 		return daemon.Config{}, err
@@ -191,10 +195,8 @@ func serveConfig(cmd *cobra.Command) (daemon.Config, error) {
 	if err := level.UnmarshalText([]byte(sv.LogLevel)); err != nil {
 		return daemon.Config{}, usagef("invalid log-level %q: want debug, info, warn or error", sv.LogLevel)
 	}
-	if sv.PreferredTeam != "" {
-		if err := validateTeam(sv.PreferredTeam); err != nil {
-			return daemon.Config{}, usagef("invalid preferred-team: %w", err)
-		}
+	if cfg.PreferredTeams, err = preferredTeams(sv.PreferredTeams); err != nil {
+		return daemon.Config{}, err
 	}
 	for _, login := range sv.Greylist {
 		if strings.TrimSpace(login) == "" {
@@ -206,6 +208,26 @@ func serveConfig(cmd *cobra.Command) (daemon.Config, error) {
 	}
 	cfg.Logger = slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), &slog.HandlerOptions{Level: level}))
 	return cfg, nil
+}
+
+// preferredTeams validates the serve.preferred-teams map: team names of the form org/slug, integer points.
+// It returns nil for an empty map.
+func preferredTeams(raw map[string]any) (map[string]int, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	teams := make(map[string]int, len(raw))
+	for _, team := range slices.Sorted(maps.Keys(raw)) {
+		if err := validateTeam(team); err != nil {
+			return nil, usagef("invalid %s: %w", preferredTeamsKey, err)
+		}
+		points, ok := raw[team].(int)
+		if !ok {
+			return nil, usagef("invalid %s %s: points %v, want an integer", preferredTeamsKey, team, raw[team])
+		}
+		teams[team] = points
+	}
+	return teams, nil
 }
 
 func parseDuration(name, v string) (time.Duration, error) {

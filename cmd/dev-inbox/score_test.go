@@ -65,11 +65,12 @@ func TestScoreWeights(t *testing.T) {
 		},
 		{
 			name: "every key",
-			file: "serve:\n  score:\n    urgent: 1\n    preferred-team: 2\n    greylist: 3\n    direct: 4\n" +
-				"    checks-running: 5\n    checks-success: 6\n    per-failing-check: 7\n    merge-conflict: 8\n",
+			file: "serve:\n  score:\n    urgent: 1\n    greylist: 3\n    direct: 4\n" +
+				"    checks-running: 5\n    checks-success: 6\n    per-failing-check: 7\n    merge-conflict: 8\n" +
+				"    needs-me: 9\n    rereview: 10\n    thread-reply: 11\n    mentioned: 12\n    team-review: 13\n    draft: 14\n",
 			want: derive.Weights{
-				Urgent: 1, PreferredTeam: 2, Greylist: 3, Direct: 4, ChecksRunning: 5, ChecksSuccess: 6, PerFailingCheck: 7,
-				MergeConflict: 8,
+				Urgent: 1, Greylist: 3, Direct: 4, ChecksRunning: 5, ChecksSuccess: 6, PerFailingCheck: 7,
+				MergeConflict: 8, NeedsMe: 9, Rereview: 10, ThreadReply: 11, Mentioned: 12, TeamReview: 13, Draft: 14,
 			},
 		},
 		{
@@ -80,7 +81,7 @@ func TestScoreWeights(t *testing.T) {
 		{
 			name: "other flags do not touch the weights",
 			file: "serve:\n  score:\n    urgent: 9\n",
-			args: []string{"--preferred-team", "acme/x", "--greylist", "a"},
+			args: []string{"--preferred-teams", "acme/x=3", "--greylist", "a"},
 			want: with(func(w *derive.Weights) { w.Urgent = 9 }),
 		},
 	}
@@ -137,9 +138,6 @@ func TestConfigCreateScoreBlock(t *testing.T) {
 #     # Points when a PR-level linear.urgency annotation exists
 #     urgent: 20
 
-#     # Points when the author is a member of the preferred team
-#     preferred-team: 30
-
 #     # Points when the author is greylisted
 #     greylist: -15
 
@@ -157,6 +155,24 @@ func TestConfigCreateScoreBlock(t *testing.T) {
 
 #     # Points when the PR has merge conflicts
 #     merge-conflict: -40
+
+#     # Points when the PR is a draft
+#     draft: -5
+
+#     # Points when another author's PR has an attention reason; such PRs are never hidden
+#     needs-me: 20
+
+#     # Points when another author's PR changed since your review
+#     rereview: 30
+
+#     # Points when someone replied in a review thread you started or joined
+#     thread-reply: 15
+
+#     # Points when someone mentioned you after your last activity
+#     mentioned: 20
+
+#     # Points when a review is requested from one of your teams and the PR waits for a reviewer
+#     team-review: 5
 
 # tui:
 `

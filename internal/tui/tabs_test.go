@@ -19,13 +19,18 @@ func TestSectionTabMapping(t *testing.T) {
 		},
 		tabOthers: {model.SectionReviewRequested, model.SectionInvolved},
 	}
-	for _, sec := range model.Sections {
+	for _, sec := range displaySections {
 		if _, ok := sectionTab[sec]; !ok {
 			t.Errorf("section %s has no tab", sec)
 		}
 	}
-	if len(sectionTab) != len(model.Sections) {
-		t.Errorf("%d sections mapped, model has %d", len(sectionTab), len(model.Sections))
+	if len(sectionTab) != len(displaySections) {
+		t.Errorf("%d sections mapped, %d displayed", len(sectionTab), len(displaySections))
+	}
+	for ti, sec := range hiddenSections {
+		if sectionTab[sec] != ti {
+			t.Errorf("hidden section %s is on tab %d, want %d", sec, sectionTab[sec], ti)
+		}
 	}
 
 	a, _ := loadedApp(t, fixtureList(), 100, 40)
@@ -298,9 +303,10 @@ func TestTabBar(t *testing.T) {
 		width int
 		want  string
 	}{
-		{120, " My PRs 2   Others' PRs 3"},
-		{25, " My PRs 2   Others' PRs 3"},
-		{24, " Mine 2   Others 3"},
+		{120, " My PRs 2   Others' PRs 3 · needs me"},
+		{36, " My PRs 2   Others' PRs 3 · needs me"},
+		{35, " Mine 2   Others 3 · needs me"},
+		{29, " Mine 2   Others 3 · needs me"},
 		{18, " Mine 2   Others 3"},
 		{10, " Mine 2   "},
 	}
@@ -316,13 +322,13 @@ func TestTabBar(t *testing.T) {
 
 func TestTabBarCountsFollowTheList(t *testing.T) {
 	a, fb := loadedApp(t, scoredList(0, 5, 10), 80, 20)
-	if got := strings.TrimSpace(tabBarLine(t, a)); got != "My PRs 3   Others' PRs 0" {
+	if got := strings.TrimSpace(tabBarLine(t, a)); got != "My PRs 3   Others' PRs 0 · needs me" {
 		t.Fatalf("tab bar %q", got)
 	}
 
 	fb.list = fixtureList()
 	drain(t, a, update(t, a, keyPress("r")))
-	if got := strings.TrimSpace(tabBarLine(t, a)); got != "My PRs 2   Others' PRs 3" {
+	if got := strings.TrimSpace(tabBarLine(t, a)); got != "My PRs 2   Others' PRs 3 · needs me" {
 		t.Fatalf("tab bar after re-list %q", got)
 	}
 	if !strings.Contains(screen(a), "5 PRs") {
@@ -338,7 +344,7 @@ func TestTabBarWithoutCountsBeforeFirstLoad(t *testing.T) {
 	a := newTestApp(&fakeBackend{})
 	update(t, a, tea.WindowSizeMsg{Width: 80, Height: 20})
 	assertFits(t, screen(a), 80, 20)
-	if got := strings.TrimSpace(tabBarLine(t, a)); got != "My PRs   Others' PRs" {
+	if got := strings.TrimSpace(tabBarLine(t, a)); got != "My PRs   Others' PRs · needs me" {
 		t.Fatalf("tab bar before the list loaded: %q", got)
 	}
 }
@@ -351,11 +357,11 @@ func TestTabBarHighlightsActiveTab(t *testing.T) {
 	active := func(label string) bool { return strings.Contains(a.View().Content, a.st.tabActive.Render(label)) }
 	inactive := func(label string) bool { return strings.Contains(a.View().Content, a.st.muted.Render(label)) }
 
-	if !active("My PRs 2") || !inactive("Others' PRs 3") {
+	if !active("My PRs 2") || !inactive("Others' PRs 3 · needs me") {
 		t.Error("My PRs is not the highlighted tab")
 	}
 	press(t, a, "2")
-	if !active("Others' PRs 3") || !inactive("My PRs 2") {
+	if !active("Others' PRs 3 · needs me") || !inactive("My PRs 2") {
 		t.Error("Others' PRs is not the highlighted tab after switching")
 	}
 }

@@ -2,8 +2,10 @@ package derive
 
 import (
 	"encoding/json"
+	"maps"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -410,15 +412,24 @@ func wantTypes(ws []want) []string {
 	return out
 }
 
-// checkEvents asserts the events match ws in type and order, carry cur's key, snapshot and
-// classification with the given score, and that each Change decodes into the type of the expected one.
-func checkEvents(t *testing.T, events []model.Event, ws []want, cur model.PR, in Inputs, score int) {
+// checkEvents asserts the events match ws in type and order, carry cur's key, snapshot and the
+// classification wantCls, and that each Change decodes into the type of the expected one.
+// withoutTerms checks that the score terms of cls sum to its score and returns cls without them, for
+// tests about everything else.
+func withoutTerms(t *testing.T, cls model.Classification) model.Classification {
+	t.Helper()
+	if n := sumTerms(cls.ScoreTerms); n != cls.Score {
+		t.Errorf("score terms %+v sum to %d, score is %d", cls.ScoreTerms, n, cls.Score)
+	}
+	cls.ScoreTerms = nil
+	return cls
+}
+
+func checkEvents(t *testing.T, events []model.Event, ws []want, cur model.PR, wantCls model.Classification) {
 	t.Helper()
 	if got, wantT := types(events), wantTypes(ws); !slices.Equal(got, wantT) {
 		t.Fatalf("event types = %v, want %v", got, wantT)
 	}
-	wantCls := Classify(cur, in.Viewer)
-	wantCls.Score = score
 	for i, ev := range events {
 		if ev.PR != cur.Key {
 			t.Errorf("event %d (%s) PR = %v, want %v", i, ev.Type, ev.PR, cur.Key)
@@ -436,7 +447,7 @@ func checkEvents(t *testing.T, events []model.Event, ws []want, cur model.PR, in
 		if len(data.PR.Comments) != 0 {
 			t.Errorf("event %d (%s) snapshot carries %d comments", i, ev.Type, len(data.PR.Comments))
 		}
-		if !reflect.DeepEqual(data.Classification, wantCls) {
+		if !reflect.DeepEqual(withoutTerms(t, data.Classification), wantCls) {
 			t.Errorf("event %d (%s) classification = %+v, want %+v", i, ev.Type, data.Classification, wantCls)
 		}
 		if ws[i].change == nil {
@@ -465,13 +476,30 @@ func TestDiff(t *testing.T) {
 	requestChange := func(req model.ReviewRequest, direct bool) model.ChangeReviewRequest {
 		return model.ChangeReviewRequest{ReviewRequest: req, Direct: direct}
 	}
+	// mention is a comment that needs the viewer unless their reactions acknowledge it.
+	mention := func(reactions ...string) model.Comment {
+		c := comment("c1", "other", 5)
+		c.Body, c.ViewerReactions = "@viewer ping", reactions
+		return c
+	}
+	withComments := func(cs ...model.Comment) model.PR {
+		return basePR(func(pr *model.PR) { pr.Comments = cs })
+	}
+
+	direct := []string{ReasonReviewRequested}
+	directScore := DefaultWeights.Direct + DefaultWeights.NeedsMe
+	mentioned := []string{ReasonMentioned}
+	mentionedScore := DefaultWeights.Mentioned + DefaultWeights.NeedsMe
 
 	tests := []struct {
 		name  string
 		old   *model.PR
 		cur   model.PR
 		want  []want
-		score int // expected score of cur, e.g. DefaultWeights.Direct for a request naming the viewer personally
+		score int // expected score of cur, e.g. directScore for a request naming the viewer personally
+		// attention are the expected attention reasons of a foreign cur; they replace Classify's reasons
+		// and set NeedsMe.
+		attention []string
 	}{
 		{
 			name: "discovery emits only discovered",
@@ -504,7 +532,8 @@ func TestDiff(t *testing.T) {
 				{model.EventReviewRequested, requestChange(model.ReviewRequest{Team: "acme-co/core"}, false)},
 				{model.EventReviewRequested, requestChange(model.ReviewRequest{Login: "Viewer"}, true)},
 			},
-			score: DefaultWeights.Direct,
+			score:     directScore,
+			attention: direct,
 		},
 		{
 			name: "identical snapshots emit nothing",
@@ -521,6 +550,52 @@ func TestDiff(t *testing.T) {
 				c.Body = "edited"
 				pr.Comments = []model.Comment{c}
 			}),
+			want: nil,
+		},
+		{
+			name: "acknowledging reaction is an update that clears attention",
+			old:  ptr(withComments(mention())),
+			cur:  withComments(mention("THUMBS_UP")),
+			want: []want{{model.EventUpdated, nil}},
+		},
+		{
+			name:      "removed reaction is an update that restores attention",
+			old:       ptr(withComments(mention("HEART"))),
+			cur:       withComments(mention()),
+			want:      []want{{model.EventUpdated, nil}},
+			score:     mentionedScore,
+			attention: mentioned,
+		},
+		{
+			name:      "any reaction change is an update",
+			old:       ptr(withComments(mention("EYES"))),
+			cur:       withComments(mention("EYES", "CONFUSED")),
+			want:      []want{{model.EventUpdated, nil}},
+			score:     mentionedScore,
+			attention: mentioned,
+		},
+		{
+			name: "unchanged reactions emit nothing",
+			old:  ptr(withComments(mention("THUMBS_UP"))),
+			cur:  withComments(mention("THUMBS_UP")),
+			want: nil,
+		},
+		{
+			name: "nil versus empty reactions emit nothing",
+			old:  ptr(withComments(mention([]string{}...))),
+			cur:  withComments(mention()),
+			want: nil,
+		},
+		{
+			name: "reactions on a new comment add no second update",
+			old:  ptr(basePR()),
+			cur:  withComments(mention("ROCKET")),
+			want: []want{{model.EventCommentAdded, mention("ROCKET")}, {model.EventUpdated, nil}},
+		},
+		{
+			name: "reactions on a vanished comment emit nothing",
+			old:  ptr(withComments(mention("THUMBS_UP"))),
+			cur:  basePR(),
 			want: nil,
 		},
 		{
@@ -579,7 +654,8 @@ func TestDiff(t *testing.T) {
 				{model.EventSectionChanged, model.ChangeSection{From: model.SectionInvolved, To: model.SectionReviewRequested}},
 				{model.EventUpdated, nil},
 			},
-			score: DefaultWeights.Direct,
+			score:     directScore,
+			attention: direct,
 		},
 		{
 			name: "review requested from a viewer team",
@@ -591,7 +667,8 @@ func TestDiff(t *testing.T) {
 				{model.EventReviewRequested, requestChange(model.ReviewRequest{Team: "ACME-CO/core"}, false)},
 				{model.EventUpdated, nil},
 			},
-			score: DefaultWeights.Direct,
+			score:     directScore,
+			attention: direct,
 		},
 		{
 			name: "requests for others are not events but still update the PR",
@@ -630,7 +707,8 @@ func TestDiff(t *testing.T) {
 				{model.EventReviewRequested, requestChange(model.ReviewRequest{Login: "viewer"}, true)},
 				{model.EventUpdated, nil},
 			},
-			score: DefaultWeights.Direct,
+			score:     directScore,
+			attention: direct,
 		},
 		{
 			name: "commits pushed",
@@ -778,6 +856,7 @@ func TestDiff(t *testing.T) {
 				{model.EventDraftChanged, model.ChangeDraft{IsDraft: true}},
 				{model.EventUpdated, nil},
 			},
+			score: DefaultWeights.Draft,
 		},
 		{
 			name: "section changed without another trigger",
@@ -859,7 +938,12 @@ func TestDiff(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Diff: %v", err)
 			}
-			checkEvents(t, events, tt.want, tt.cur, inputs, tt.score)
+			wantCls := Classify(tt.cur, viewer)
+			wantCls.Score = tt.score
+			if tt.attention != nil {
+				wantCls.Reasons, wantCls.NeedsMe = tt.attention, true
+			}
+			checkEvents(t, events, tt.want, tt.cur, wantCls)
 		})
 	}
 }
@@ -883,6 +967,14 @@ func clonePR(pr model.PR) model.PR {
 	pr.Comments = slices.Clone(pr.Comments)
 	pr.Reviews = slices.Clone(pr.Reviews)
 	return pr
+}
+
+// teamPoints is the boost of team in tests.
+const teamPoints = 30
+
+// team is one boosted team of the given members.
+func team(points int, members ...string) []TeamBoost {
+	return []TeamBoost{{Team: "acme-co/core", Points: points, Members: members}}
 }
 
 func annotation(commentID, key string) model.Annotation {
@@ -959,25 +1051,25 @@ func TestScore(t *testing.T) {
 		{
 			name: "preferred",
 			pr:   byAuthor("alice"),
-			in:   Inputs{Priority: Priority{PreferredMembers: []string{"bob", "alice"}}},
-			want: DefaultWeights.PreferredTeam,
+			in:   Inputs{Priority: Priority{Teams: team(teamPoints, "bob", "alice")}},
+			want: teamPoints,
 		},
 		{
 			name: "preferred compares case-insensitively",
 			pr:   byAuthor("Alice"),
-			in:   Inputs{Priority: Priority{PreferredMembers: []string{"aLICE"}}},
-			want: DefaultWeights.PreferredTeam,
+			in:   Inputs{Priority: Priority{Teams: team(teamPoints, "aLICE")}},
+			want: teamPoints,
 		},
 		{
 			name: "author outside the preferred team",
 			pr:   byAuthor("carol"),
-			in:   Inputs{Priority: Priority{PreferredTeam: "acme-co/core", PreferredMembers: []string{"alice", "bob"}}},
+			in:   Inputs{Priority: Priority{Teams: team(teamPoints, "alice", "bob")}},
 			want: 0,
 		},
 		{
 			name: "empty author is not preferred",
 			pr:   byAuthor(""),
-			in:   Inputs{Priority: Priority{PreferredMembers: []string{""}}},
+			in:   Inputs{Priority: Priority{Teams: team(teamPoints, "")}},
 			want: 0,
 		},
 		{
@@ -1052,7 +1144,7 @@ func TestScore(t *testing.T) {
 			name: "preferred, direct and urgent",
 			pr:   byAuthor("alice"),
 			cls:  direct,
-			in:   Inputs{Priority: Priority{PreferredMembers: []string{"alice"}}, Annotations: urgent},
+			in:   Inputs{Priority: Priority{Teams: team(teamPoints, "alice")}, Annotations: urgent},
 			want: 60,
 		},
 		{
@@ -1077,7 +1169,7 @@ func TestScore(t *testing.T) {
 		{
 			name: "author both preferred and greylisted",
 			pr:   byAuthor("alice"),
-			in:   Inputs{Priority: Priority{PreferredMembers: []string{"alice"}, Greylist: []string{"alice"}}},
+			in:   Inputs{Priority: Priority{Teams: team(teamPoints, "alice"), Greylist: []string{"alice"}}},
 			want: 15,
 		},
 		{
@@ -1085,7 +1177,7 @@ func TestScore(t *testing.T) {
 			pr:   byAuthor("alice"),
 			cls:  direct,
 			in: Inputs{
-				Priority:    Priority{PreferredMembers: []string{"alice"}, Greylist: []string{"alice"}},
+				Priority:    Priority{Teams: team(teamPoints, "alice"), Greylist: []string{"alice"}},
 				Annotations: urgent,
 			},
 			want: 45,
@@ -1224,18 +1316,25 @@ func TestScore(t *testing.T) {
 			want: DefaultWeights.ChecksSuccess + DefaultWeights.MergeConflict,
 		},
 		{
+			name: "draft",
+			pr:   basePR(func(pr *model.PR) { pr.IsDraft = true }),
+			want: DefaultWeights.Draft,
+		},
+		{
 			name: "all terms",
 			pr: basePR(func(pr *model.PR) {
 				pr.Author = "alice"
 				pr.Checks, pr.ChecksRunning, pr.ChecksFailing = model.ChecksPending, 1, 2
 				pr.Mergeable = "CONFLICTING"
+				pr.IsDraft = true
 			}),
 			cls: direct,
 			in: Inputs{
-				Priority:    Priority{PreferredMembers: []string{"alice"}, Greylist: []string{"alice"}},
+				Priority:    Priority{Teams: team(teamPoints, "alice"), Greylist: []string{"alice"}},
 				Annotations: urgent,
 			},
-			want: 45 + DefaultWeights.ChecksRunning + 2*DefaultWeights.PerFailingCheck + DefaultWeights.MergeConflict,
+			want: 45 + DefaultWeights.ChecksRunning + 2*DefaultWeights.PerFailingCheck + DefaultWeights.MergeConflict +
+				DefaultWeights.Draft,
 		},
 	}
 	for _, tt := range tests {
@@ -1252,13 +1351,13 @@ func TestScoreWeights(t *testing.T) {
 	// Distinct weights make a wrongly wired term show up in the sum.
 	w := Weights{
 		Urgent:          7,
-		PreferredTeam:   11,
 		Greylist:        -13,
 		Direct:          17,
 		ChecksRunning:   19,
 		ChecksSuccess:   23,
 		PerFailingCheck: -29,
 		MergeConflict:   -31,
+		Draft:           -37,
 	}
 	custom := func(mut func(*Weights)) Weights {
 		out := w
@@ -1268,16 +1367,17 @@ func TestScoreWeights(t *testing.T) {
 	urgent := []model.Annotation{annotation("", UrgencyKey)}
 	direct := model.Classification{Section: model.SectionReviewRequested, Direct: true}
 	alice := []string{"alice"}
-	// everything triggers every term: 7+11-13+17+19+23-2*29-31.
+	// everything triggers every term: 7+11-13+17+19+23-2*29-31-37.
 	everything := basePR(func(pr *model.PR) {
 		pr.Author = "alice"
 		pr.Checks, pr.ChecksRunning, pr.ChecksFailing = model.ChecksSuccess, 1, 2
 		pr.Mergeable = "CONFLICTING"
+		pr.IsDraft = true
 	})
-	const everythingScore = -25
+	const everythingScore = -62
 	all := func(weights Weights) Inputs {
 		return Inputs{
-			Priority:    Priority{PreferredMembers: alice, Greylist: alice, Weights: weights},
+			Priority:    Priority{Teams: team(11, alice...), Greylist: alice, Weights: weights},
 			Annotations: urgent,
 		}
 	}
@@ -1298,8 +1398,8 @@ func TestScoreWeights(t *testing.T) {
 		{
 			name: "preferred team",
 			pr:   byAuthor("alice"),
-			in:   Inputs{Priority: Priority{PreferredMembers: alice, Weights: w}},
-			want: w.PreferredTeam,
+			in:   Inputs{Priority: Priority{Teams: team(11, alice...), Weights: w}},
+			want: 11,
 		},
 		{
 			name: "greylist",
@@ -1339,6 +1439,12 @@ func TestScoreWeights(t *testing.T) {
 			want: w.MergeConflict,
 		},
 		{
+			name: "draft",
+			pr:   basePR(func(pr *model.PR) { pr.IsDraft = true }),
+			in:   Inputs{Priority: Priority{Weights: w}},
+			want: w.Draft,
+		},
+		{
 			name: "mergeable adds nothing",
 			pr:   withMergeable("MERGEABLE"),
 			in:   Inputs{Priority: Priority{Weights: w}},
@@ -1358,18 +1464,18 @@ func TestScoreWeights(t *testing.T) {
 			want: everythingScore,
 		},
 		{
-			name: "zero weights score zero",
+			name: "zero weights leave only the team boost",
 			pr:   everything,
 			cls:  direct,
 			in:   all(Weights{}),
-			want: 0,
+			want: 11,
 		},
 		{
 			name: "unset weights do not fall back to the defaults",
 			pr:   everything,
 			cls:  direct,
 			in:   all(Weights{Urgent: 5}),
-			want: 5,
+			want: 5 + 11,
 		},
 		{
 			name: "zero urgent disables only urgent",
@@ -1377,13 +1483,6 @@ func TestScoreWeights(t *testing.T) {
 			cls:  direct,
 			in:   all(custom(func(w *Weights) { w.Urgent = 0 })),
 			want: everythingScore - w.Urgent,
-		},
-		{
-			name: "zero preferred team disables only preferred team",
-			pr:   everything,
-			cls:  direct,
-			in:   all(custom(func(w *Weights) { w.PreferredTeam = 0 })),
-			want: everythingScore - w.PreferredTeam,
 		},
 		{
 			name: "zero greylist disables only greylist",
@@ -1426,6 +1525,13 @@ func TestScoreWeights(t *testing.T) {
 			cls:  direct,
 			in:   all(custom(func(w *Weights) { w.MergeConflict = 0 })),
 			want: everythingScore - w.MergeConflict,
+		},
+		{
+			name: "draft disabled",
+			pr:   everything,
+			cls:  direct,
+			in:   all(custom(func(w *Weights) { w.Draft = 0 })),
+			want: everythingScore - w.Draft,
 		},
 		{
 			name: "zero merge conflict adds nothing to a conflicting PR",
@@ -1501,10 +1607,16 @@ func TestEvaluate(t *testing.T) {
 			}),
 			in: Inputs{
 				Viewer:      viewer,
-				Priority:    Priority{PreferredMembers: []string{"alice"}, Weights: DefaultWeights},
+				Priority:    Priority{Teams: team(teamPoints, "alice"), Weights: DefaultWeights},
 				Annotations: []model.Annotation{annotation("", UrgencyKey)},
 			},
-			want: model.Classification{Section: model.SectionReviewRequested, Direct: true, Score: 60},
+			want: model.Classification{
+				Section: model.SectionReviewRequested,
+				Direct:  true,
+				Reasons: []string{ReasonReviewRequested},
+				NeedsMe: true,
+				Score:   60 + DefaultWeights.NeedsMe,
+			},
 		},
 		{
 			name: "score uses the configured weights",
@@ -1513,11 +1625,51 @@ func TestEvaluate(t *testing.T) {
 				pr.ReviewRequests = []model.ReviewRequest{{Login: "viewer"}}
 			}),
 			in: Inputs{
-				Viewer:      viewer,
-				Priority:    Priority{PreferredMembers: []string{"alice"}, Weights: Weights{Urgent: 1, PreferredTeam: 2, Direct: 4}},
+				Viewer: viewer,
+				Priority: Priority{
+					Teams:   team(2, "alice"),
+					Weights: Weights{Urgent: 1, Direct: 4, NeedsMe: 8},
+				},
 				Annotations: []model.Annotation{annotation("", UrgencyKey)},
 			},
-			want: model.Classification{Section: model.SectionReviewRequested, Direct: true, Score: 7},
+			want: model.Classification{
+				Section: model.SectionReviewRequested,
+				Direct:  true,
+				Reasons: []string{ReasonReviewRequested},
+				NeedsMe: true,
+				Score:   15,
+			},
+		},
+		{
+			name: "own PR gets no attention reasons, needs-me or annotation contributions",
+			pr: minePR(func(pr *model.PR) {
+				pr.Comments = []model.Comment{{ID: "c1", Kind: model.CommentIssue, Author: "other", Body: "@viewer?", CreatedAt: at(5)}}
+			}),
+			in: Inputs{
+				Viewer:   viewer,
+				Priority: Priority{Weights: DefaultWeights},
+				Annotations: []model.Annotation{{
+					PR: basePR().Key, Key: "jev.attention", UpdatedAt: at(10),
+					Value: json.RawMessage(`{"score":50,"attention":["question for you"]}`),
+				}},
+			},
+			want: model.Classification{Section: model.SectionNeedsAction, Reasons: []string{"new comments"}},
+		},
+		{
+			name: "closed foreign PR gets no attention",
+			pr: basePR(func(pr *model.PR) {
+				pr.State = model.PRStateClosed
+				pr.Comments = []model.Comment{{ID: "c1", Kind: model.CommentIssue, Author: "other", Body: "@viewer?", CreatedAt: at(5)}}
+			}),
+			in: Inputs{
+				Viewer:   viewer,
+				Priority: Priority{Weights: DefaultWeights},
+				Annotations: []model.Annotation{{
+					PR: basePR().Key, Key: "jev.attention", UpdatedAt: at(10),
+					Value: json.RawMessage(`{"score":50,"attention":["question for you"]}`),
+				}},
+			},
+			want: model.Classification{},
 		},
 		{
 			name: "own PR keeps its reasons next to the score",
@@ -1560,17 +1712,17 @@ func TestEvaluate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := Evaluate(tt.pr, tt.in); !reflect.DeepEqual(got, tt.want) {
+			if got := withoutTerms(t, Evaluate(tt.pr, tt.in)); !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("Evaluate = %+v, want %+v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestDiffEventsCarryScore(t *testing.T) {
+func TestDiffEventsCarryClassification(t *testing.T) {
 	in := Inputs{
 		Viewer:      viewer,
-		Priority:    Priority{PreferredTeam: "acme-co/core", PreferredMembers: []string{"alice"}, Weights: DefaultWeights},
+		Priority:    Priority{Teams: team(teamPoints, "alice"), Weights: DefaultWeights},
 		Annotations: []model.Annotation{annotation("", UrgencyKey)},
 	}
 	direct := model.ChangeReviewRequest{ReviewRequest: model.ReviewRequest{Login: "viewer"}, Direct: true}
@@ -1578,18 +1730,31 @@ func TestDiffEventsCarryScore(t *testing.T) {
 		pr.Author = "alice"
 		pr.ReviewRequests = []model.ReviewRequest{{Login: "viewer"}}
 	}
-	wantScore := DefaultWeights.Urgent + DefaultWeights.PreferredTeam + DefaultWeights.Direct
+	reviewed := func(pr *model.PR) {
+		pr.Author = "alice"
+		pr.Reviews = []model.Review{{ID: "r1", Author: "viewer", State: "CHANGES_REQUESTED", SubmittedAt: at(2), CommitSHA: "aaa"}}
+	}
+	base := DefaultWeights.Urgent + teamPoints + DefaultWeights.NeedsMe
+	requestedCls := model.Classification{
+		Section: model.SectionReviewRequested,
+		Direct:  true,
+		Reasons: []string{ReasonReviewRequested},
+		NeedsMe: true,
+		Score:   base + DefaultWeights.Direct,
+	}
 
 	tests := []struct {
 		name string
 		old  *model.PR
 		cur  model.PR
 		want []want
+		cls  model.Classification
 	}{
 		{
 			name: "discovery",
 			cur:  basePR(requested),
 			want: []want{{model.EventDiscovered, nil}, {model.EventReviewRequested, direct}},
+			cls:  requestedCls,
 		},
 		{
 			name: "update",
@@ -1600,6 +1765,22 @@ func TestDiffEventsCarryScore(t *testing.T) {
 				{model.EventSectionChanged, model.ChangeSection{From: model.SectionInvolved, To: model.SectionReviewRequested}},
 				{model.EventUpdated, nil},
 			},
+			cls: requestedCls,
+		},
+		{
+			name: "push after the viewer requested changes",
+			old:  ptr(basePR(reviewed)),
+			cur:  basePR(reviewed, func(pr *model.PR) { pr.HeadSHA = "bbb" }),
+			want: []want{
+				{model.EventCommitsPushed, model.ChangeCommits{Before: "aaa", After: "bbb"}},
+				{model.EventUpdated, nil},
+			},
+			cls: model.Classification{
+				Section: model.SectionInvolved,
+				Reasons: []string{ReasonRereview},
+				NeedsMe: true,
+				Score:   base + DefaultWeights.Rereview,
+			},
 		},
 	}
 	for _, tt := range tests {
@@ -1608,18 +1789,1196 @@ func TestDiffEventsCarryScore(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Diff: %v", err)
 			}
-			checkEvents(t, events, tt.want, tt.cur, in, wantScore)
-			for i, ev := range events {
-				var data eventData
-				if err := json.Unmarshal(ev.Data, &data); err != nil {
-					t.Fatalf("event %d (%s) data: %v", i, ev.Type, err)
+			checkEvents(t, events, tt.want, tt.cur, tt.cls)
+		})
+	}
+}
+
+func TestLastActivity(t *testing.T) {
+	tests := []struct {
+		name     string
+		reviews  []model.Review
+		comments []model.Comment
+		want     time.Time
+	}{
+		{name: "no activity is zero"},
+		{
+			name:     "others' activity is ignored",
+			reviews:  []model.Review{{ID: "r1", Author: "other", SubmittedAt: at(3)}},
+			comments: []model.Comment{{ID: "c1", Kind: model.CommentIssue, Author: "other", CreatedAt: at(4)}},
+		},
+		{
+			name:    "latest review",
+			reviews: []model.Review{{ID: "r1", Author: "viewer", SubmittedAt: at(6)}, {ID: "r2", Author: "viewer", SubmittedAt: at(3)}},
+			comments: []model.Comment{
+				{ID: "c1", Kind: model.CommentIssue, Author: "viewer", CreatedAt: at(4)},
+				{ID: "c2", Kind: model.CommentIssue, Author: "other", CreatedAt: at(9)},
+			},
+			want: at(6),
+		},
+		{
+			name:    "latest inline comment, compared case-insensitively",
+			reviews: []model.Review{{ID: "r1", Author: "viewer", SubmittedAt: at(3)}},
+			comments: []model.Comment{
+				{ID: "c1", Kind: model.CommentIssue, Author: "viewer", CreatedAt: at(4)},
+				{ID: "c2", Kind: model.CommentInline, Author: "VIEWER", ThreadID: "t1", CreatedAt: at(5)},
+			},
+			want: at(5),
+		},
+		{
+			name:     "latest review body",
+			comments: []model.Comment{{ID: "c1", Kind: model.CommentReview, Author: "viewer", CreatedAt: at(7)}},
+			want:     at(7),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pr := basePR(func(pr *model.PR) { pr.Reviews, pr.Comments = tt.reviews, tt.comments })
+			if got := LastActivity(pr, viewer); !got.Equal(tt.want) {
+				t.Fatalf("LastActivity = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMyThreads(t *testing.T) {
+	pr := basePR(func(pr *model.PR) {
+		pr.Comments = []model.Comment{
+			{ID: "c1", Kind: model.CommentInline, Author: "viewer", ThreadID: "started"},
+			{ID: "c2", Kind: model.CommentInline, Author: "other", ThreadID: "started"},
+			{ID: "c3", Kind: model.CommentInline, Author: "other", ThreadID: "replied"},
+			{ID: "c4", Kind: model.CommentInline, Author: "Viewer", ThreadID: "replied"},
+			{ID: "c5", Kind: model.CommentInline, Author: "other", ThreadID: "foreign"},
+			{ID: "c6", Kind: model.CommentIssue, Author: "viewer"},
+		}
+	})
+	want := map[string]bool{"started": true, "replied": true}
+	if got := MyThreads(pr, viewer); !maps.Equal(got, want) {
+		t.Fatalf("MyThreads = %v, want %v", got, want)
+	}
+	if got := MyThreads(basePR(), viewer); len(got) != 0 {
+		t.Fatalf("MyThreads without comments = %v, want none", got)
+	}
+}
+
+func TestHandled(t *testing.T) {
+	inline := func(id, author, thread string, min int) model.Comment {
+		return model.Comment{ID: id, Kind: model.CommentInline, Author: author, ThreadID: thread, CreatedAt: at(min)}
+	}
+	issue := func(id, author string, min int) model.Comment {
+		return model.Comment{ID: id, Kind: model.CommentIssue, Author: author, CreatedAt: at(min)}
+	}
+	review := func(id, author, state string, min int) model.Review {
+		return model.Review{ID: id, Author: author, State: state, SubmittedAt: at(min)}
+	}
+	// summary is the body of review id, which the fetcher stores as a comment with the review's ID.
+	summary := func(id, author string, min int) model.Comment {
+		return model.Comment{ID: id, Kind: model.CommentReview, Author: author, Body: "summary", CreatedAt: at(min)}
+	}
+	reacted := func(c model.Comment, reactions ...string) model.Comment {
+		c.ViewerReactions = reactions
+		return c
+	}
+
+	// Others' comments at minute 5: an inline reply in thread t1, a top-level comment and a review summary.
+	reply := inline("reply", "author", "t1", 5)
+	question := issue("question", "author", 5)
+	theirSummary := summary("theirs", "author", 5)
+
+	tests := []struct {
+		name     string
+		c        model.Comment
+		comments []model.Comment // besides c
+		reviews  []model.Review
+		want     bool
+	}{
+		{name: "untouched inline reply", c: reply},
+		{name: "untouched top-level comment", c: question},
+		{name: "untouched review summary", c: theirSummary},
+
+		{name: "thumbs up", c: reacted(reply, "THUMBS_UP"), want: true},
+		{name: "heart", c: reacted(question, "HEART"), want: true},
+		{name: "hooray", c: reacted(theirSummary, "HOORAY"), want: true},
+		{name: "rocket", c: reacted(reply, "ROCKET"), want: true},
+		{name: "eyes", c: reacted(reply, "EYES")},
+		{name: "thumbs down", c: reacted(reply, "THUMBS_DOWN")},
+		{name: "confused and laugh", c: reacted(question, "CONFUSED", "LAUGH")},
+		{name: "one acknowledging reaction among others", c: reacted(reply, "EYES", "ROCKET"), want: true},
+
+		{name: "later reply in the same thread", c: reply, comments: []model.Comment{inline("me", "viewer", "t1", 6)}, want: true},
+		{
+			name: "later reply in the same thread compares logins case-insensitively", c: reply,
+			comments: []model.Comment{inline("me", "Viewer", "t1", 6)}, want: true,
+		},
+		{name: "later reply in another thread", c: reply, comments: []model.Comment{inline("me", "viewer", "t2", 6)}},
+		{name: "earlier reply in the same thread", c: reply, comments: []model.Comment{inline("me", "viewer", "t1", 4)}},
+		{name: "later reply by someone else", c: reply, comments: []model.Comment{inline("me", "other", "t1", 6)}},
+		{name: "later top-level comment for an inline reply", c: reply, comments: []model.Comment{issue("me", "viewer", 6)}},
+		{
+			name: "inline comments without a thread do not share one", c: inline("loose", "author", "", 5),
+			comments: []model.Comment{inline("me", "viewer", "", 6)},
+		},
+
+		{name: "later top-level comment", c: question, comments: []model.Comment{issue("me", "viewer", 6)}, want: true},
+		{name: "later top-level comment on a review summary", c: theirSummary, comments: []model.Comment{issue("me", "viewer", 6)}, want: true},
+		{name: "earlier top-level comment", c: question, comments: []model.Comment{issue("me", "viewer", 4)}},
+		{name: "top-level comment at the same time", c: question, comments: []model.Comment{issue("me", "viewer", 5)}},
+		{name: "later top-level comment by someone else", c: question, comments: []model.Comment{issue("me", "other", 6)}},
+		{name: "later inline comment for a top-level comment", c: question, comments: []model.Comment{inline("me", "viewer", "t1", 6)}},
+
+		{name: "later approval of an inline reply", c: reply, reviews: []model.Review{review("r", "viewer", "APPROVED", 6)}, want: true},
+		{name: "later change request", c: question, reviews: []model.Review{review("r", "viewer", "CHANGES_REQUESTED", 6)}, want: true},
+		{name: "later dismissed review", c: theirSummary, reviews: []model.Review{review("r", "viewer", "DISMISSED", 6)}, want: true},
+		{
+			name: "later review with a summary", c: reply,
+			reviews: []model.Review{review("r", "viewer", "COMMENTED", 6)}, comments: []model.Comment{summary("r", "viewer", 6)},
+			want: true,
+		},
+		{name: "later bare thread-reply review", c: question, reviews: []model.Review{review("r", "viewer", "COMMENTED", 6)}},
+		{
+			name: "later bare review next to the summary of an earlier one", c: question,
+			reviews:  []model.Review{review("r1", "viewer", "COMMENTED", 4), review("r2", "viewer", "COMMENTED", 6)},
+			comments: []model.Comment{summary("r1", "viewer", 4)},
+		},
+		{name: "earlier approval", c: reply, reviews: []model.Review{review("r", "viewer", "APPROVED", 4)}},
+		{name: "later approval by someone else", c: reply, reviews: []model.Review{review("r", "other", "APPROVED", 6)}},
+
+		{name: "own inline comment", c: inline("mine", "viewer", "t1", 5), want: true},
+		{name: "own top-level comment compares logins case-insensitively", c: issue("mine", "VIEWER", 5), want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pr := basePR(func(pr *model.PR) {
+				pr.Comments = append([]model.Comment{tt.c}, tt.comments...)
+				pr.Reviews = tt.reviews
+			})
+			if got := Handled(pr, viewer, tt.c); got != tt.want {
+				t.Fatalf("Handled = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMentions(t *testing.T) {
+	tests := []struct {
+		login, body string
+		want        bool
+	}{
+		{"viewer", "@viewer", true},
+		{"viewer", "@viewer2 and later @viewer", true},
+		{"viewer", "ä@viewer", true},
+		{"", "@ hello", false},
+		{"viewer", "@Viewer please have a look", true},
+		{"viewer", "cc @VIEWER.", true},
+		{"viewer", "(@viewer)", true},
+		{"viewer", "@other, @viewer: thoughts?", true},
+		{"viewer", "first line\n@viewer second line", true},
+		{"jan", "@jan", true},
+		{"jan", "@janroehrich", false},
+		{"jan", "@jan-roehrich", false},
+		{"jan", "@jan_r", false},
+		{"jan", "@jan2", false},
+		{"viewer", "mail me@viewer.dev", false},
+		{"viewer", "viewer", false},
+		{"viewer", "@ viewer", false},
+		{"viewer", "", false},
+	}
+	for _, tt := range tests {
+		if got := Mentions(tt.body, tt.login); got != tt.want {
+			t.Errorf("mention of %q in %q = %v, want %v", tt.login, tt.body, got, tt.want)
+		}
+	}
+}
+
+func TestAttention(t *testing.T) {
+	w := DefaultWeights
+	review := func(state string, min int, sha string) model.Review {
+		return model.Review{ID: "r" + state, Author: "viewer", State: state, SubmittedAt: at(min), CommitSHA: sha}
+	}
+	inline := func(id, author, thread string, min int, sha string) model.Comment {
+		return model.Comment{ID: id, Kind: model.CommentInline, Author: author, ThreadID: thread, CommitSHA: sha, CreatedAt: at(min)}
+	}
+	issue := func(id, author, body string, min int) model.Comment {
+		return model.Comment{ID: id, Kind: model.CommentIssue, Author: author, Body: body, CreatedAt: at(min)}
+	}
+	note := func(commentID, value string, min int) model.Annotation {
+		return model.Annotation{
+			PR: basePR().Key, CommentID: commentID, Key: "jev.attention", Value: json.RawMessage(value), UpdatedAt: at(min),
+		}
+	}
+	quiet := func(commentID string) model.Annotation {
+		return note(commentID, `{"intent":"ack","attention":false}`, 10)
+	}
+	reacted := func(c model.Comment, reactions ...string) model.Comment {
+		c.ViewerReactions = reactions
+		return c
+	}
+
+	// The viewer reviewed commit aaa at minute 2 with an inline finding that starts thread t1; the
+	// author answers in t1 at minute 5. Cases with head "bbb" saw a push since.
+	commented := []model.Review{review("COMMENTED", 2, "aaa")}
+	finding := inline("finding", "viewer", "t1", 2, "aaa")
+	answer := inline("answer", "author", "t1", 5, "")
+	mention := issue("mention", "author", "@viewer what do you think?", 6)
+
+	tests := []struct {
+		name        string
+		head        string // HeadSHA if set, otherwise "aaa"
+		requests    []model.ReviewRequest
+		reviews     []model.Review
+		comments    []model.Comment
+		threads     []model.ReviewThread
+		annotations []model.Annotation
+		mut         func(*model.PR)
+		reasons     []string
+		score       int
+	}{
+		{
+			name: "no activity needs nothing",
+		},
+		{
+			name:     "direct review request",
+			requests: []model.ReviewRequest{{Login: "viewer"}},
+			reasons:  []string{ReasonReviewRequested},
+			score:    w.Direct + w.NeedsMe,
+		},
+		{
+			name:     "team-only review request gives no reason without Now",
+			requests: []model.ReviewRequest{{Team: "acme-co/core"}},
+		},
+
+		{
+			name:    "changes requested and pushed",
+			head:    "bbb",
+			reviews: []model.Review{review("CHANGES_REQUESTED", 2, "aaa")},
+			reasons: []string{ReasonRereview},
+			score:   w.Rereview + w.NeedsMe,
+		},
+		{
+			name:    "dismissed and pushed",
+			head:    "bbb",
+			reviews: []model.Review{review("DISMISSED", 2, "aaa")},
+			reasons: []string{ReasonRereview},
+			score:   w.Rereview + w.NeedsMe,
+		},
+		{
+			name:    "changes requested without a push",
+			reviews: []model.Review{review("CHANGES_REQUESTED", 2, "aaa")},
+		},
+		{
+			name:    "approved and pushed",
+			head:    "bbb",
+			reviews: []model.Review{review("APPROVED", 2, "aaa")},
+		},
+		{
+			name:    "only the latest review's state counts",
+			head:    "bbb",
+			reviews: []model.Review{review("CHANGES_REQUESTED", 2, "aaa"), review("APPROVED", 3, "aaa")},
+		},
+		{
+			name:    "unknown review commit disables re-review",
+			head:    "bbb",
+			reviews: []model.Review{review("CHANGES_REQUESTED", 2, "")},
+		},
+		{
+			name:     "a later inline comment on the head is my head",
+			head:     "bbb",
+			reviews:  []model.Review{review("CHANGES_REQUESTED", 2, "aaa")},
+			comments: []model.Comment{inline("c1", "viewer", "t1", 5, "bbb")},
+		},
+		{
+			name:     "a later inline comment with an unknown commit disables re-review",
+			head:     "bbb",
+			reviews:  []model.Review{review("CHANGES_REQUESTED", 2, "aaa")},
+			comments: []model.Comment{inline("c1", "viewer", "t1", 5, "")},
+		},
+		{
+			name:     "a later review is my head",
+			head:     "bbb",
+			reviews:  []model.Review{review("CHANGES_REQUESTED", 5, "aaa")},
+			comments: []model.Comment{inline("c1", "viewer", "t1", 2, "bbb")},
+			reasons:  []string{ReasonRereview},
+			score:    w.Rereview + w.NeedsMe,
+		},
+		{
+			name:     "requested changes survive my later top-level comment",
+			head:     "bbb",
+			reviews:  []model.Review{review("CHANGES_REQUESTED", 2, "aaa")},
+			comments: []model.Comment{issue("c1", "viewer", "looks good now", 7)},
+			reasons:  []string{ReasonRereview},
+			score:    w.Rereview + w.NeedsMe,
+		},
+		{
+			name:     "reply in my thread and pushed",
+			head:     "bbb",
+			reviews:  commented,
+			comments: []model.Comment{finding, answer},
+			reasons:  []string{ReasonRereview},
+			score:    w.Rereview + w.NeedsMe,
+		},
+		{
+			name:    "reply in a thread I replied in and pushed",
+			head:    "bbb",
+			reviews: commented,
+			comments: []model.Comment{
+				inline("theirs", "author", "t1", 1, "aaa"),
+				finding,
+				answer,
+			},
+			reasons: []string{ReasonRereview},
+			score:   w.Rereview + w.NeedsMe,
+		},
+		{
+			name:     "my reply on the old commit after theirs clears re-review",
+			head:     "bbb",
+			reviews:  commented,
+			comments: []model.Comment{finding, answer, inline("ok", "viewer", "t1", 7, "aaa")},
+		},
+		{
+			name:     "my top-level comment after their reply clears re-review but leaves the reply open",
+			head:     "bbb",
+			reviews:  commented,
+			comments: []model.Comment{finding, answer, issue("ok", "viewer", "looks good now", 7)},
+			reasons:  []string{ReasonThreadReply},
+			score:    w.ThreadReply + w.NeedsMe,
+		},
+		{
+			name:     "my formal review after their reply clears re-review and the reply",
+			head:     "bbb",
+			reviews:  []model.Review{commented[0], review("APPROVED", 7, "aaa")},
+			comments: []model.Comment{finding, answer},
+		},
+		{
+			name:     "bot reply in my thread is ignored",
+			head:     "bbb",
+			reviews:  commented,
+			comments: []model.Comment{finding, inline("bot", "coderabbitai[bot]", "t1", 5, "")},
+		},
+		{
+			name:     "reply in someone else's thread is ignored",
+			head:     "bbb",
+			reviews:  commented,
+			comments: []model.Comment{finding, inline("other", "author", "t2", 5, "")},
+		},
+		{
+			name:     "my thread resolved by someone else and pushed",
+			head:     "bbb",
+			reviews:  commented,
+			comments: []model.Comment{finding},
+			threads:  []model.ReviewThread{{ID: "t1", IsResolved: true, ResolvedBy: "author"}},
+			reasons:  []string{ReasonRereview},
+			score:    w.Rereview + w.NeedsMe,
+		},
+		{
+			name:     "my thread resolved by someone else counts despite my later activity",
+			head:     "bbb",
+			reviews:  commented,
+			comments: []model.Comment{finding, issue("c1", "viewer", "one more thing", 7)},
+			threads:  []model.ReviewThread{{ID: "t1", IsResolved: true, ResolvedBy: "author"}},
+			reasons:  []string{ReasonRereview},
+			score:    w.Rereview + w.NeedsMe,
+		},
+		{
+			name:     "my thread resolved by me",
+			head:     "bbb",
+			reviews:  commented,
+			comments: []model.Comment{finding},
+			threads:  []model.ReviewThread{{ID: "t1", IsResolved: true, ResolvedBy: "Viewer"}},
+		},
+		{
+			name:     "my thread resolved by someone else without a push",
+			reviews:  commented,
+			comments: []model.Comment{finding},
+			threads:  []model.ReviewThread{{ID: "t1", IsResolved: true, ResolvedBy: "author"}},
+		},
+		{
+			name:     "someone else's thread resolved",
+			head:     "bbb",
+			reviews:  commented,
+			comments: []model.Comment{finding},
+			threads:  []model.ReviewThread{{ID: "t2", IsResolved: true, ResolvedBy: "author"}},
+		},
+		{
+			name:     "my unresolved thread",
+			head:     "bbb",
+			reviews:  commented,
+			comments: []model.Comment{finding},
+			threads:  []model.ReviewThread{{ID: "t1"}},
+		},
+
+		{
+			name:     "reply in my thread",
+			reviews:  commented,
+			comments: []model.Comment{finding, answer},
+			reasons:  []string{ReasonThreadReply},
+			score:    w.ThreadReply + w.NeedsMe,
+		},
+		{
+			name:     "reply in my thread with unknown commits",
+			head:     "bbb",
+			reviews:  []model.Review{review("COMMENTED", 2, "")},
+			comments: []model.Comment{inline("finding", "viewer", "t1", 2, ""), answer},
+			reasons:  []string{ReasonThreadReply},
+			score:    w.ThreadReply + w.NeedsMe,
+		},
+		{
+			name:     "reply answered by my later reply in the thread",
+			reviews:  commented,
+			comments: []model.Comment{finding, answer, inline("ok", "viewer", "t1", 7, "aaa")},
+		},
+		{
+			name:     "reply not answered by my later top-level comment",
+			reviews:  commented,
+			comments: []model.Comment{finding, answer, issue("ok", "viewer", "thanks", 7)},
+			reasons:  []string{ReasonThreadReply},
+			score:    w.ThreadReply + w.NeedsMe,
+		},
+		{
+			name:     "pushback acknowledged by a thumbs up",
+			reviews:  commented,
+			comments: []model.Comment{finding, reacted(inline("pushback", "author", "t1", 5, ""), "THUMBS_UP")},
+		},
+		{
+			name:     "reply with a non-acknowledging reaction",
+			reviews:  commented,
+			comments: []model.Comment{finding, reacted(answer, "EYES")},
+			reasons:  []string{ReasonThreadReply},
+			score:    w.ThreadReply + w.NeedsMe,
+		},
+		{
+			name:     "acknowledging one reply leaves another open",
+			reviews:  commented,
+			comments: []model.Comment{finding, reacted(answer, "HEART"), inline("more", "author", "t1", 6, "")},
+			reasons:  []string{ReasonThreadReply},
+			score:    w.ThreadReply + w.NeedsMe,
+		},
+		{
+			// GitHub records my bare reply in t2 as a COMMENTED review without body.
+			name:    "my reply in another thread leaves the reply open",
+			reviews: []model.Review{commented[0], {ID: "bare", Author: "viewer", State: "COMMENTED", SubmittedAt: at(7)}},
+			comments: []model.Comment{
+				finding, answer,
+				inline("finding2", "viewer", "t2", 2, "aaa"),
+				inline("answer2", "author", "t2", 6, ""),
+				inline("ok", "viewer", "t2", 7, "aaa"),
+			},
+			reasons: []string{ReasonThreadReply},
+			score:   w.ThreadReply + w.NeedsMe,
+		},
+		{
+			name:    "my review with a summary answers every reply",
+			reviews: []model.Review{commented[0], {ID: "summary", Author: "viewer", State: "COMMENTED", SubmittedAt: at(7)}},
+			comments: []model.Comment{
+				finding, answer,
+				{ID: "summary", Kind: model.CommentReview, Author: "viewer", Body: "all good", CreatedAt: at(7)},
+			},
+		},
+		{
+			name:     "bot reply",
+			reviews:  commented,
+			comments: []model.Comment{finding, inline("bot", "Copilot[BOT]", "t1", 5, "")},
+		},
+		{
+			name:        "reply suppressed by a comment annotation",
+			reviews:     commented,
+			comments:    []model.Comment{finding, answer},
+			annotations: []model.Annotation{quiet("answer")},
+		},
+		{
+			name:        "only attention false suppresses",
+			reviews:     commented,
+			comments:    []model.Comment{finding, answer},
+			annotations: []model.Annotation{note("answer", `{"intent":"question_for_me","attention":true}`, 10)},
+			reasons:     []string{ReasonThreadReply},
+			score:       w.ThreadReply + w.NeedsMe,
+		},
+		{
+			name:        "suppressed reply still counts for re-review",
+			head:        "bbb",
+			reviews:     commented,
+			comments:    []model.Comment{finding, answer},
+			annotations: []model.Annotation{quiet("answer")},
+			reasons:     []string{ReasonRereview},
+			score:       w.Rereview + w.NeedsMe,
+		},
+
+		{
+			name:     "mention",
+			comments: []model.Comment{mention},
+			reasons:  []string{ReasonMentioned},
+			score:    w.Mentioned + w.NeedsMe,
+		},
+		{
+			name: "mention in an inline comment",
+			comments: []model.Comment{{
+				ID: "c1", Kind: model.CommentInline, Author: "author", ThreadID: "t9", Body: "cc @Viewer", CreatedAt: at(5),
+			}},
+			reasons: []string{ReasonMentioned},
+			score:   w.Mentioned + w.NeedsMe,
+		},
+		{
+			name:     "mention answered by my later top-level comment",
+			comments: []model.Comment{mention, issue("ok", "viewer", "on it", 7)},
+		},
+		{
+			name:     "mention not answered by my earlier top-level comment",
+			comments: []model.Comment{issue("ok", "viewer", "on it", 4), mention},
+			reasons:  []string{ReasonMentioned},
+			score:    w.Mentioned + w.NeedsMe,
+		},
+		{
+			name:     "mention acknowledged by a reaction",
+			comments: []model.Comment{reacted(mention, "HOORAY")},
+		},
+		{
+			name:     "mention with a thumbs down",
+			comments: []model.Comment{reacted(mention, "THUMBS_DOWN")},
+			reasons:  []string{ReasonMentioned},
+			score:    w.Mentioned + w.NeedsMe,
+		},
+		{
+			name:    "mention answered by my later review with a summary",
+			reviews: []model.Review{{ID: "summary", Author: "viewer", State: "COMMENTED", SubmittedAt: at(7)}},
+			comments: []model.Comment{
+				mention,
+				{ID: "summary", Kind: model.CommentReview, Author: "viewer", Body: "replied inline", CreatedAt: at(7)},
+			},
+		},
+		{
+			name:     "mention not answered by my bare thread reply",
+			reviews:  []model.Review{{ID: "bare", Author: "viewer", State: "COMMENTED", SubmittedAt: at(7)}},
+			comments: []model.Comment{mention, inline("ok", "viewer", "t2", 7, "aaa")},
+			reasons:  []string{ReasonMentioned},
+			score:    w.Mentioned + w.NeedsMe,
+		},
+		{
+			name: "inline mention answered in its thread",
+			comments: []model.Comment{
+				{ID: "c1", Kind: model.CommentInline, Author: "author", ThreadID: "t9", Body: "cc @Viewer", CreatedAt: at(5)},
+				inline("ok", "viewer", "t9", 7, "aaa"),
+			},
+		},
+		{
+			name: "inline mention not answered by my later top-level comment",
+			comments: []model.Comment{
+				{ID: "c1", Kind: model.CommentInline, Author: "author", ThreadID: "t9", Body: "cc @Viewer", CreatedAt: at(5)},
+				issue("ok", "viewer", "on it", 7),
+			},
+			reasons: []string{ReasonMentioned},
+			score:   w.Mentioned + w.NeedsMe,
+		},
+		{
+			name:     "my own mention",
+			comments: []model.Comment{issue("c1", "viewer", "note to @viewer", 5)},
+		},
+		{
+			name:     "mention of a longer login",
+			comments: []model.Comment{issue("c1", "author", "@viewer2 and @viewer-bot", 5)},
+		},
+		{
+			name:        "mention suppressed by a comment annotation",
+			comments:    []model.Comment{mention},
+			annotations: []model.Annotation{quiet("mention")},
+		},
+		{
+			name:     "mention by a bot",
+			comments: []model.Comment{issue("c1", "release[bot]", "@viewer please approve the release", 5)},
+			reasons:  []string{ReasonMentioned},
+			score:    w.Mentioned + w.NeedsMe,
+		},
+
+		{
+			name:     "core reasons in order, re-review replacing thread reply",
+			head:     "bbb",
+			requests: []model.ReviewRequest{{Login: "viewer"}},
+			reviews:  []model.Review{review("CHANGES_REQUESTED", 2, "aaa")},
+			comments: []model.Comment{finding, answer, mention},
+			reasons:  []string{ReasonReviewRequested, ReasonRereview, ReasonMentioned},
+			score:    w.Direct + w.Rereview + w.Mentioned + w.NeedsMe,
+		},
+		{
+			name:     "thread reply and mention",
+			reviews:  commented,
+			comments: []model.Comment{finding, answer, mention},
+			reasons:  []string{ReasonThreadReply, ReasonMentioned},
+			score:    w.ThreadReply + w.Mentioned + w.NeedsMe,
+		},
+		{
+			name:     "needs me with a negative total",
+			comments: []model.Comment{mention},
+			mut: func(pr *model.PR) {
+				pr.Mergeable = "CONFLICTING"
+				pr.Checks, pr.ChecksFailing = model.ChecksFailure, 3
+			},
+			reasons: []string{ReasonMentioned},
+			score:   w.MergeConflict + 3*w.PerFailingCheck + w.Mentioned + w.NeedsMe,
+		},
+
+		{
+			name:        "fresh annotation adds score and reasons",
+			reviews:     commented,
+			annotations: []model.Annotation{note("", `{"score":25,"attention":["question for you"]}`, 3)},
+			reasons:     []string{"question for you"},
+			score:       25 + w.NeedsMe,
+		},
+		{
+			name:        "stale annotation contributes nothing",
+			reviews:     commented,
+			annotations: []model.Annotation{note("", `{"score":25,"attention":["question for you"]}`, 1)},
+		},
+		{
+			name:        "annotation from the time of my last activity is stale",
+			reviews:     commented,
+			annotations: []model.Annotation{note("", `{"score":25,"attention":["question for you"]}`, 2)},
+		},
+		{
+			name:        "my top-level comment retires an annotation",
+			comments:    []model.Comment{issue("ok", "viewer", "answered", 7)},
+			annotations: []model.Annotation{note("", `{"score":25,"attention":["question for you"]}`, 6)},
+		},
+		{
+			name:        "without activity every annotation is fresh",
+			annotations: []model.Annotation{note("", `{"score":25,"attention":["question for you"]}`, 0)},
+			reasons:     []string{"question for you"},
+			score:       25 + w.NeedsMe,
+		},
+		{
+			name:        "score alone does not need me",
+			annotations: []model.Annotation{note("", `{"score":10}`, 3)},
+			score:       10,
+		},
+		{
+			name:        "score is clamped to 100",
+			annotations: []model.Annotation{note("", `{"score":1000}`, 3)},
+			score:       100,
+		},
+		{
+			name:        "score is clamped to -100 and the PR still needs me",
+			annotations: []model.Annotation{note("", `{"score":-1000,"attention":["pushback on your comment"]}`, 3)},
+			reasons:     []string{"pushback on your comment"},
+			score:       -100 + w.NeedsMe,
+		},
+		{
+			name: "each annotation is clamped on its own",
+			annotations: []model.Annotation{
+				note("", `{"score":150}`, 3),
+				note("", `{"score":-30}`, 3),
+			},
+			score: 70,
+		},
+		{
+			name: "score must be an integer",
+			annotations: []model.Annotation{
+				note("", `{"score":12.5,"attention":["question for you"]}`, 3),
+				note("", `{"score":"12"}`, 3),
+			},
+			reasons: []string{"question for you"},
+			score:   w.NeedsMe,
+		},
+		{
+			name: "at most five reasons per annotation, each truncated to 60 characters",
+			annotations: []model.Annotation{note("", `{"attention":["a","b","c","d","`+
+				strings.Repeat("x", 70)+`","f"]}`, 3)},
+			reasons: []string{"a", "b", "c", "d", strings.Repeat("x", 60)},
+			score:   w.NeedsMe,
+		},
+		{
+			name:        "truncation counts characters, not bytes",
+			annotations: []model.Annotation{note("", `{"attention":["`+strings.Repeat("ä", 61)+`"]}`, 3)},
+			reasons:     []string{strings.Repeat("ä", 60)},
+			score:       w.NeedsMe,
+		},
+		{
+			name:        "blank reasons are skipped",
+			annotations: []model.Annotation{note("", `{"attention":[""," ","  spaced  "]}`, 3)},
+			reasons:     []string{"spaced"},
+			score:       w.NeedsMe,
+		},
+		{
+			name:     "reasons are deduplicated against core reasons and across annotations",
+			comments: []model.Comment{mention},
+			annotations: []model.Annotation{
+				note("", `{"attention":["mentioned you","pushback","pushback"]}`, 10),
+				note("", `{"attention":["pushback","question for you"]}`, 10),
+			},
+			reasons: []string{ReasonMentioned, "pushback", "question for you"},
+			score:   w.Mentioned + w.NeedsMe,
+		},
+		{
+			name: "malformed attention lists are ignored",
+			annotations: []model.Annotation{
+				note("", `{"attention":["question for you",5]}`, 3),
+				note("", `{"attention":"question for you"}`, 3),
+			},
+		},
+		{
+			name: "values that are no object contribute nothing",
+			annotations: []model.Annotation{
+				note("", `true`, 3),
+				note("", `"question for you"`, 3),
+				note("", `["question for you"]`, 3),
+			},
+		},
+		{
+			name:        "comment-level annotation adds neither score nor reasons",
+			annotations: []model.Annotation{note("c9", `{"score":50,"attention":["question for you"]}`, 3)},
+		},
+		{
+			name:        "PR-level attention false suppresses nothing",
+			comments:    []model.Comment{mention},
+			annotations: []model.Annotation{note("", `{"attention":false}`, 10)},
+			reasons:     []string{ReasonMentioned},
+			score:       w.Mentioned + w.NeedsMe,
+		},
+		{
+			name:    "urgency keeps its fixed weight, also when stale",
+			reviews: commented,
+			annotations: []model.Annotation{{
+				PR: basePR().Key, Key: UrgencyKey, UpdatedAt: at(1),
+				Value: json.RawMessage(`{"score":50,"attention":["urgent"]}`),
+			}},
+			score: w.Urgent,
+		},
+		{
+			name:    "fresh urgency adds no contribution of its own",
+			reviews: commented,
+			annotations: []model.Annotation{{
+				PR: basePR().Key, Key: UrgencyKey, UpdatedAt: at(10),
+				Value: json.RawMessage(`{"score":50,"attention":["urgent"]}`),
+			}},
+			score: w.Urgent,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pr := basePR(func(pr *model.PR) {
+				if tt.head != "" {
+					pr.HeadSHA = tt.head
 				}
-				if data.Score != wantScore {
-					t.Errorf("event %d (%s) score = %d, want %d", i, ev.Type, data.Score, wantScore)
-				}
+				pr.ReviewRequests, pr.Reviews, pr.Comments, pr.ReviewThreads = tt.requests, tt.reviews, tt.comments, tt.threads
+			})
+			if tt.mut != nil {
+				tt.mut(&pr)
+			}
+			got := Evaluate(pr, Inputs{Viewer: viewer, Priority: Priority{Weights: w}, Annotations: tt.annotations})
+			if !slices.Equal(got.Reasons, tt.reasons) {
+				t.Errorf("reasons = %q, want %q", got.Reasons, tt.reasons)
+			}
+			if wantNeedsMe := len(tt.reasons) > 0; got.NeedsMe != wantNeedsMe {
+				t.Errorf("needsMe = %v, want %v", got.NeedsMe, wantNeedsMe)
+			}
+			if got.Score != tt.score {
+				t.Errorf("score = %d, want %d", got.Score, tt.score)
+			}
+		})
+	}
+}
+
+func TestTeamReview(t *testing.T) {
+	now := t0.Add(30 * 24 * time.Hour)
+	w := DefaultWeights
+	team := []model.ReviewRequest{{Team: "acme-co/core"}}
+	review := func(author, state string) model.Review {
+		return model.Review{ID: author + state, Author: author, State: state, SubmittedAt: now.Add(-time.Hour)}
+	}
+	// ready is a foreign PR that waits for a reviewer from the viewer's team and passes every condition.
+	ready := func(mut ...func(*model.PR)) model.PR {
+		return basePR(append([]func(*model.PR){func(pr *model.PR) {
+			pr.ReviewRequests = team
+			pr.UpdatedAt = now.Add(-time.Hour)
+		}}, mut...)...)
+	}
+	wait := []string{ReasonTeamReviewRequested}
+	waitScore := w.TeamReview + w.NeedsMe
+
+	tests := []struct {
+		name      string
+		pr        model.PR
+		greylist  []string
+		weights   *Weights
+		zeroNow   bool
+		reasons   []string
+		wantScore int
+	}{
+		{name: "waiting for a reviewer", pr: ready(), reasons: wait, wantScore: waitScore},
+		{
+			name: "team names match case-insensitively",
+			pr: ready(func(pr *model.PR) {
+				pr.ReviewRequests = []model.ReviewRequest{{Team: "ACME-co/Core"}}
+			}),
+			reasons: wait, wantScore: waitScore,
+		},
+		{
+			name: "request for another team",
+			pr: ready(func(pr *model.PR) {
+				pr.ReviewRequests = []model.ReviewRequest{{Team: "acme-co/docs"}}
+			}),
+		},
+		{
+			name: "request for someone else",
+			pr: ready(func(pr *model.PR) {
+				pr.ReviewRequests = []model.ReviewRequest{{Login: "carol"}}
+			}),
+		},
+		{name: "no request", pr: ready(func(pr *model.PR) { pr.ReviewRequests = nil })},
+		{
+			name: "one of several requests is my team",
+			pr: ready(func(pr *model.PR) {
+				pr.ReviewRequests = []model.ReviewRequest{{Login: "carol"}, {Team: "acme-co/docs"}, {Team: "acme-co/core"}}
+			}),
+			reasons: wait, wantScore: waitScore,
+		},
+		{
+			name: "direct request wins and earns no team weight",
+			pr: ready(func(pr *model.PR) {
+				pr.ReviewRequests = []model.ReviewRequest{{Team: "acme-co/core"}, {Login: "viewer"}}
+			}),
+			reasons: []string{ReasonReviewRequested}, wantScore: w.Direct + w.NeedsMe,
+		},
+		{name: "own PR", pr: ready(func(pr *model.PR) { pr.Author = "viewer" })},
+		{name: "merged PR", pr: ready(func(pr *model.PR) { pr.State = model.PRStateMerged })},
+
+		{name: "draft", pr: ready(func(pr *model.PR) { pr.IsDraft = true })},
+		{name: "bot author", pr: ready(func(pr *model.PR) { pr.Author = "dependabot[bot]" })},
+		{name: "greylisted author", pr: ready(func(pr *model.PR) { pr.Author = "Renovate" }), greylist: []string{"renovate"}},
+		{
+			name:     "greylist matches the author with or without the bot suffix",
+			pr:       ready(func(pr *model.PR) { pr.Author = "mend" }),
+			greylist: []string{"mend[bot]"},
+		},
+		{name: "author is not greylisted", pr: ready(), greylist: []string{"renovate"}, reasons: wait, wantScore: waitScore},
+
+		{
+			name:    "updated exactly at the age limit",
+			pr:      ready(func(pr *model.PR) { pr.UpdatedAt = now.Add(-TeamReviewMaxAge) }),
+			reasons: wait, wantScore: waitScore,
+		},
+		{name: "updated just past the age limit", pr: ready(func(pr *model.PR) { pr.UpdatedAt = now.Add(-TeamReviewMaxAge - time.Nanosecond) })},
+		{name: "never updated", pr: ready(func(pr *model.PR) { pr.UpdatedAt = time.Time{} })},
+		{
+			name:    "updated after Now",
+			pr:      ready(func(pr *model.PR) { pr.UpdatedAt = now.Add(time.Minute) }),
+			reasons: wait, wantScore: waitScore,
+		},
+		{name: "zero Now disables the signal", pr: ready(), zeroNow: true},
+
+		{
+			name: "review by another human",
+			pr: ready(func(pr *model.PR) {
+				pr.Reviews = []model.Review{review("carol", "COMMENTED")}
+			}),
+		},
+		{
+			name: "approval by another human",
+			pr: ready(func(pr *model.PR) {
+				pr.Reviews = []model.Review{review("carol", "APPROVED")}
+			}),
+		},
+		{
+			name: "changes requested by another human",
+			pr: ready(func(pr *model.PR) {
+				pr.Reviews = []model.Review{review("carol", "CHANGES_REQUESTED")}
+			}),
+		},
+		{
+			name: "my own review ends the wait",
+			pr: ready(func(pr *model.PR) {
+				pr.Reviews = []model.Review{review("viewer", "COMMENTED")}
+			}),
+		},
+		{
+			name: "the author's thread replies are not a review",
+			pr: ready(func(pr *model.PR) {
+				pr.Reviews = []model.Review{review("Someone", "COMMENTED"), review("someone", "COMMENTED")}
+			}),
+			reasons: wait, wantScore: waitScore,
+		},
+		{
+			name: "bot reviews do not count",
+			pr: ready(func(pr *model.PR) {
+				pr.Reviews = []model.Review{review("cursor[bot]", "COMMENTED"), review("copilot-pull-request-reviewer[bot]", "APPROVED")}
+			}),
+			reasons: wait, wantScore: waitScore,
+		},
+		{
+			name: "greylisted reviewers do not count",
+			pr: ready(func(pr *model.PR) {
+				pr.Reviews = []model.Review{review("Renovate", "APPROVED"), review("mend", "COMMENTED")}
+			}),
+			greylist: []string{"renovate", "mend[bot]"},
+			reasons:  wait, wantScore: waitScore,
+		},
+		{
+			name: "a human review among ignored ones ends the wait",
+			pr: ready(func(pr *model.PR) {
+				pr.Reviews = []model.Review{review("cursor[bot]", "COMMENTED"), review("someone", "COMMENTED"), review("carol", "COMMENTED")}
+			}),
+		},
+
+		{name: "failing checks", pr: ready(func(pr *model.PR) { pr.Checks, pr.ChecksFailing = model.ChecksFailure, 1 })},
+		{
+			name:    "pending checks are fine",
+			pr:      ready(func(pr *model.PR) { pr.Checks, pr.ChecksRunning = model.ChecksPending, 1 }),
+			reasons: wait, wantScore: waitScore + w.ChecksRunning,
+		},
+		{
+			name:    "passing checks are fine",
+			pr:      ready(func(pr *model.PR) { pr.Checks = model.ChecksSuccess }),
+			reasons: wait, wantScore: waitScore + w.ChecksSuccess,
+		},
+		{name: "merge conflict", pr: ready(func(pr *model.PR) { pr.Mergeable = "CONFLICTING" })},
+		{
+			name:    "unknown mergeability is fine",
+			pr:      ready(func(pr *model.PR) { pr.Mergeable = "UNKNOWN" }),
+			reasons: wait, wantScore: waitScore,
+		},
+
+		{
+			name: "adds to other signals",
+			pr: ready(func(pr *model.PR) {
+				pr.Comments = []model.Comment{{ID: "c1", Kind: model.CommentIssue, Author: "someone", Body: "@viewer ptal", CreatedAt: now.Add(-time.Minute)}}
+			}),
+			reasons: []string{ReasonTeamReviewRequested, ReasonMentioned}, wantScore: w.TeamReview + w.Mentioned + w.NeedsMe,
+		},
+		{
+			name:      "the weight is configurable",
+			pr:        ready(),
+			weights:   &Weights{TeamReview: 7, NeedsMe: 11, Direct: 3},
+			reasons:   wait,
+			wantScore: 7 + 11,
+		},
+		{
+			name:      "weight zero keeps the reason and the needs-me bonus",
+			pr:        ready(),
+			weights:   &Weights{NeedsMe: 11},
+			reasons:   wait,
+			wantScore: 11,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := Inputs{Viewer: viewer, Priority: Priority{Greylist: tt.greylist, Weights: w}, Now: now}
+			if tt.weights != nil {
+				in.Priority.Weights = *tt.weights
+			}
+			if tt.zeroNow {
+				in.Now = time.Time{}
+			}
+			got := Evaluate(tt.pr, in)
+			if !slices.Equal(got.Reasons, tt.reasons) {
+				t.Errorf("reasons = %q, want %q", got.Reasons, tt.reasons)
+			}
+			if wantNeedsMe := len(tt.reasons) > 0; got.NeedsMe != wantNeedsMe {
+				t.Errorf("needsMe = %v, want %v", got.NeedsMe, wantNeedsMe)
+			}
+			wantScore := tt.wantScore
+			if len(tt.reasons) == 0 {
+				wantScore = Score(tt.pr, got, in)
+			}
+			if got.Score != wantScore {
+				t.Errorf("score = %d, want %d", got.Score, wantScore)
 			}
 		})
 	}
 }
 
 func ptr[T any](v T) *T { return &v }
+
+func TestHiddenAnnotation(t *testing.T) {
+	pr := basePR(func(pr *model.PR) { pr.IsDraft = true })
+	a := HiddenAnnotation(pr, model.Classification{Direct: true})
+	if a.PR != pr.Key || a.Key != HiddenKey || a.CommentID != "" {
+		t.Fatalf("annotation = %+v", a)
+	}
+	var m HiddenMark
+	if err := json.Unmarshal(a.Value, &m); err != nil {
+		t.Fatal(err)
+	}
+	if want := (HiddenMark{Seen: pr.FetchedAt, Head: "aaa", Draft: true, Requested: true}); m != want {
+		t.Fatalf("mark = %+v, want %+v", m, want)
+	}
+}
+
+func TestHidden(t *testing.T) {
+	comment := func(author string, minutes int) func(*model.PR) {
+		return func(pr *model.PR) {
+			pr.Comments = append(pr.Comments, model.Comment{ID: "c", Kind: model.CommentIssue, Author: author, CreatedAt: at(minutes)})
+		}
+	}
+	review := func(author string, minutes int) func(*model.PR) {
+		return func(pr *model.PR) {
+			pr.Reviews = append(pr.Reviews, model.Review{ID: "r", Author: author, State: "COMMENTED", SubmittedAt: at(minutes)})
+		}
+	}
+	draft := func(pr *model.PR) { pr.IsDraft = true }
+	requested := func(pr *model.PR) { pr.ReviewRequests = []model.ReviewRequest{{Login: "viewer"}} }
+	// seen is basePR's FetchedAt, at(1).
+	hide := func(pr model.PR) []model.Annotation {
+		return []model.Annotation{HiddenAnnotation(pr, Classify(pr, viewer))}
+	}
+	in := Inputs{Viewer: viewer, Priority: Priority{Greylist: []string{"acme-bot"}, Weights: DefaultWeights}}
+
+	tests := []struct {
+		name        string
+		pr          model.PR // current snapshot
+		annotations []model.Annotation
+		want        bool
+	}{
+		{name: "not hidden", pr: basePR()},
+		{name: "unchanged", pr: basePR(), annotations: hide(basePR()), want: true},
+		{name: "own PR unchanged", pr: minePR(), annotations: hide(minePR()), want: true},
+		{name: "new commits or rebase", pr: basePR(func(pr *model.PR) { pr.HeadSHA = "bbb" }), annotations: hide(basePR())},
+		{name: "comment by someone else after the seen snapshot", pr: basePR(comment("alice", 2)), annotations: hide(basePR())},
+		{name: "comment on own PR", pr: minePR(comment("alice", 2)), annotations: hide(minePR())},
+		{name: "comment already seen", pr: basePR(comment("alice", 1)), annotations: hide(basePR()), want: true},
+		{name: "own comment", pr: basePR(comment("Viewer", 2)), annotations: hide(basePR()), want: true},
+		{name: "bot comment", pr: basePR(comment("github-actions[bot]", 2)), annotations: hide(basePR()), want: true},
+		{name: "greylisted comment", pr: basePR(comment("acme-bot", 2)), annotations: hide(basePR()), want: true},
+		{name: "review by someone else", pr: basePR(review("alice", 2)), annotations: hide(basePR())},
+		{name: "review already seen", pr: basePR(review("alice", 0)), annotations: hide(basePR()), want: true},
+		{name: "own review", pr: basePR(review("viewer", 2)), annotations: hide(basePR()), want: true},
+		{name: "marked ready for review", pr: basePR(), annotations: hide(basePR(draft))},
+		{name: "converted to draft", pr: basePR(draft), annotations: hide(basePR()), want: true},
+		{name: "review newly requested from the viewer", pr: basePR(requested), annotations: hide(basePR())},
+		{name: "review request seen", pr: basePR(requested), annotations: hide(basePR(requested)), want: true},
+		{name: "request removed", pr: basePR(), annotations: hide(basePR(requested)), want: true},
+		{
+			name: "checks, conflicts and updates are not new",
+			pr: basePR(func(pr *model.PR) {
+				pr.Checks, pr.ChecksFailing, pr.Mergeable, pr.UpdatedAt = model.ChecksFailure, 2, "CONFLICTING", at(30)
+			}),
+			annotations: hide(basePR()),
+			want:        true,
+		},
+		{
+			name: "comment-level annotation does not hide",
+			pr:   basePR(),
+			annotations: []model.Annotation{func() model.Annotation {
+				a := HiddenAnnotation(basePR(), model.Classification{})
+				a.CommentID = "c"
+				return a
+			}()},
+		},
+		{name: "value that is no mark", pr: basePR(), annotations: []model.Annotation{annotation("", HiddenKey)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := in
+			in.Annotations = tt.annotations
+			if got := Evaluate(tt.pr, in).Hidden; got != tt.want {
+				t.Fatalf("Hidden = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTeamBoost(t *testing.T) {
+	teams := []TeamBoost{
+		{Team: "acme-co/eng", Points: 10, Members: []string{"alice", "bob", "carol"}},
+		{Team: "acme-co/core", Points: 30, Members: []string{"Alice"}},
+		{Team: "acme-co/sales", Points: -20, Members: []string{"bob", "dave"}},
+	}
+	tests := []struct {
+		author string
+		want   int
+	}{
+		{author: "carol", want: 10},
+		{author: "ALICE", want: 30}, // highest of eng and core, not the sum
+		{author: "bob", want: 10},   // highest of eng and sales
+		{author: "dave", want: -20}, // a lone negative team still applies
+		{author: "eve", want: 0},    // in no team
+		{author: "", want: 0},       // unknown author
+	}
+	for _, tt := range tests {
+		t.Run(tt.author, func(t *testing.T) {
+			if got := Score(byAuthor(tt.author), model.Classification{}, Inputs{Priority: Priority{Teams: teams}}); got != tt.want {
+				t.Fatalf("Score = %d, want %d", got, tt.want)
+			}
+		})
+	}
+	if got := Score(byAuthor(""), model.Classification{}, Inputs{Priority: Priority{Teams: team(5, "")}}); got != 0 {
+		t.Fatalf("empty author matched an empty member: Score = %d", got)
+	}
+}
+
+func TestScoreTerms(t *testing.T) {
+	term := func(name string, points int) model.ScoreTerm { return model.ScoreTerm{Term: name, Points: points} }
+	in := Inputs{
+		Viewer: viewer,
+		Priority: Priority{
+			Teams: []TeamBoost{
+				{Team: "acme-co/eng", Points: 10, Members: []string{"alice"}},
+				{Team: "acme-co/core", Points: 30, Members: []string{"alice"}},
+			},
+			Greylist: []string{"noisy"},
+			Weights:  DefaultWeights,
+		},
+	}
+	w := DefaultWeights
+	tests := []struct {
+		name        string
+		pr          model.PR
+		annotations []model.Annotation
+		want        []model.ScoreTerm
+	}{
+		{name: "nothing", pr: basePR()},
+		{
+			name: "own PR with every non-attention term",
+			pr: minePR(func(pr *model.PR) {
+				pr.Checks, pr.ChecksRunning, pr.ChecksFailing = model.ChecksSuccess, 1, 3
+				pr.Mergeable, pr.IsDraft = "CONFLICTING", true
+			}),
+			annotations: []model.Annotation{annotation("", UrgencyKey)},
+			want: []model.ScoreTerm{
+				term("urgent", w.Urgent), term("checks running", w.ChecksRunning), term("checks passed", w.ChecksSuccess),
+				term("3 failing checks", 3*w.PerFailingCheck), term("merge conflict", w.MergeConflict), term("draft", w.Draft),
+			},
+		},
+		{
+			name: "one failing check, greylisted author",
+			pr:   basePR(func(pr *model.PR) { pr.Author, pr.ChecksFailing = "noisy", 1 }),
+			want: []model.ScoreTerm{term("greylisted author", w.Greylist), term("1 failing check", w.PerFailingCheck)},
+		},
+		{
+			name: "best team, direct request, annotation and needs-me",
+			pr: basePR(func(pr *model.PR) {
+				pr.Author = "Alice"
+				pr.ReviewRequests = []model.ReviewRequest{{Login: "viewer"}}
+			}),
+			annotations: []model.Annotation{{
+				PR: basePR().Key, Key: "jev.attention", UpdatedAt: at(10),
+				Value: json.RawMessage(`{"score":500,"attention":["question for you"]}`),
+			}},
+			want: []model.ScoreTerm{
+				term("team acme-co/core", 30), term("review requested from you", w.Direct),
+				term("jev.attention", maxAnnotationScore), term("needs you", w.NeedsMe),
+			},
+		},
+		{
+			name: "mention",
+			pr: basePR(func(pr *model.PR) {
+				pr.Comments = []model.Comment{{ID: "c1", Kind: model.CommentIssue, Author: "bob", Body: "@viewer?", CreatedAt: at(5)}}
+			}),
+			want: []model.ScoreTerm{term(ReasonMentioned, w.Mentioned), term("needs you", w.NeedsMe)},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := in
+			in.Annotations = tt.annotations
+			got := Evaluate(tt.pr, in)
+			if !reflect.DeepEqual(got.ScoreTerms, tt.want) {
+				t.Fatalf("terms = %+v, want %+v", got.ScoreTerms, tt.want)
+			}
+			if n := sumTerms(got.ScoreTerms); n != got.Score {
+				t.Fatalf("terms sum to %d, score is %d", n, got.Score)
+			}
+		})
+	}
+
+	zero := in
+	zero.Priority.Weights = Weights{}
+	if got := Evaluate(minePR(func(pr *model.PR) { pr.IsDraft = true }), zero).ScoreTerms; got != nil {
+		t.Fatalf("zero weights: terms = %+v, want none", got)
+	}
+}

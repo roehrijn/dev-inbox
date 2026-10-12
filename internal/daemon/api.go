@@ -32,7 +32,7 @@ func (d *daemon) handleList(ctx context.Context, _ []byte) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	annotations, err := d.store.AllAnnotations(ctx)
+	annotations, err := d.store.AnnotationsByPR(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -43,9 +43,20 @@ func (d *daemon) handleList(ctx context.Context, _ []byte) (any, error) {
 		// Evaluate needs the comments to detect new ones.
 		c := derive.Evaluate(pr, in)
 		pr.Comments = nil
-		items = append(items, api.InboxItem{PR: pr, Classification: c, Annotations: in.Annotations})
+		items = append(items, api.InboxItem{PR: pr, Classification: c, Annotations: prLevelAnnotations(in.Annotations)})
 	}
 	return api.ListResponse{Viewer: in.Viewer, Items: items}, nil
+}
+
+// prLevelAnnotations returns the PR-level annotations (CommentID empty) of annotations, or nil if there are none.
+func prLevelAnnotations(annotations []model.Annotation) []model.Annotation {
+	var out []model.Annotation
+	for _, a := range annotations {
+		if a.CommentID == "" {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 func (d *daemon) handleGet(ctx context.Context, req []byte) (any, error) {

@@ -76,22 +76,43 @@ const prQuery = `query PullRequest($owner: String!, $repo: String!, $number: Int
         }
       }
       reviews(last: 100) {
-        nodes { id author { __typename login } state body url submittedAt }
+        nodes { id author { __typename login } state body url submittedAt commit { oid } reactionGroups { content viewerHasReacted } }
       }
       comments(last: 100) {
-        nodes { id author { __typename login } body url createdAt }
+        totalCount
+        nodes { id author { __typename login } body url createdAt reactionGroups { content viewerHasReacted } }
       }
-      reviewThreads(last: 50) {
-        nodes {
-          comments(first: 50) {
-            nodes { id author { __typename login } body url createdAt path line originalLine state replyTo { id } }
-          }
-        }
-      }
+      reviewThreads(first: 50) { ...ReviewThreadsPage }
     }
   }
 }
-` + statusFragment
+` + statusFragment + threadsFragment
+
+// threadsFragment is shared by the first page of review threads in prQuery and the follow-up pages
+// of threadsQuery. Comments per thread are capped at 50; FetchPR logs threads that have more. A
+// comment's SHA is originalCommit: commit follows the PR head for comments that are not outdated.
+const threadsFragment = `fragment ReviewThreadsPage on PullRequestReviewThreadConnection {
+  pageInfo { hasNextPage endCursor }
+  nodes {
+    id
+    isResolved
+    resolvedBy { __typename login }
+    comments(first: 50) {
+      totalCount
+      nodes { id author { __typename login } body url createdAt path line originalLine state replyTo { id } originalCommit { oid } reactionGroups { content viewerHasReacted } }
+    }
+  }
+}
+`
+
+const threadsQuery = `query ReviewThreads($owner: String!, $repo: String!, $number: Int!, $after: String!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 50, after: $after) { ...ReviewThreadsPage }
+    }
+  }
+}
+` + threadsFragment
 
 type gqlActor struct {
 	Typename string `json:"__typename"`
@@ -108,6 +129,36 @@ func login(a *gqlActor) string {
 		return a.Login + "[bot]"
 	}
 	return a.Login
+}
+
+// gqlReactions is the reactionGroups of a comment: one entry per reaction content, whether or not
+// anyone used it.
+type gqlReactions []struct {
+	Content          string `json:"content"`
+	ViewerHasReacted bool   `json:"viewerHasReacted"`
+}
+
+// viewer returns the contents the viewer reacted with, in GraphQL order.
+func (r gqlReactions) viewer() []string {
+	var out []string
+	for _, g := range r {
+		if g.ViewerHasReacted {
+			out = append(out, g.Content)
+		}
+	}
+	return out
+}
+
+// gqlCommit is a nullable commit reference.
+type gqlCommit struct {
+	OID string `json:"oid"`
+}
+
+func (c *gqlCommit) sha() string {
+	if c == nil {
+		return ""
+	}
+	return c.OID
 }
 
 type gqlStatus struct {
@@ -242,43 +293,61 @@ type gqlPR struct {
 	} `json:"reviewRequests"`
 	Reviews struct {
 		Nodes []struct {
-			ID          string    `json:"id"`
-			Author      *gqlActor `json:"author"`
-			State       string    `json:"state"`
-			Body        string    `json:"body"`
-			URL         string    `json:"url"`
-			SubmittedAt time.Time `json:"submittedAt"`
+			ID          string       `json:"id"`
+			Author      *gqlActor    `json:"author"`
+			State       string       `json:"state"`
+			Body        string       `json:"body"`
+			URL         string       `json:"url"`
+			SubmittedAt time.Time    `json:"submittedAt"`
+			Commit      *gqlCommit   `json:"commit"`
+			Reactions   gqlReactions `json:"reactionGroups"`
 		} `json:"nodes"`
 	} `json:"reviews"`
 	Comments struct {
-		Nodes []struct {
-			ID        string    `json:"id"`
-			Author    *gqlActor `json:"author"`
-			Body      string    `json:"body"`
-			URL       string    `json:"url"`
-			CreatedAt time.Time `json:"createdAt"`
+		TotalCount int `json:"totalCount"`
+		Nodes      []struct {
+			ID        string       `json:"id"`
+			Author    *gqlActor    `json:"author"`
+			Body      string       `json:"body"`
+			URL       string       `json:"url"`
+			CreatedAt time.Time    `json:"createdAt"`
+			Reactions gqlReactions `json:"reactionGroups"`
 		} `json:"nodes"`
 	} `json:"comments"`
-	ReviewThreads struct {
-		Nodes []struct {
-			Comments struct {
-				Nodes []struct {
-					ID           string    `json:"id"`
-					Author       *gqlActor `json:"author"`
-					Body         string    `json:"body"`
-					URL          string    `json:"url"`
-					CreatedAt    time.Time `json:"createdAt"`
-					Path         string    `json:"path"`
-					Line         *int      `json:"line"`
-					OriginalLine *int      `json:"originalLine"`
-					State        string    `json:"state"`
-					ReplyTo      *struct {
-						ID string `json:"id"`
-					} `json:"replyTo"`
-				} `json:"nodes"`
-			} `json:"comments"`
+	ReviewThreads gqlThreads `json:"reviewThreads"`
+}
+
+type gqlThreads struct {
+	PageInfo struct {
+		HasNextPage bool   `json:"hasNextPage"`
+		EndCursor   string `json:"endCursor"`
+	} `json:"pageInfo"`
+	Nodes []gqlThread `json:"nodes"`
+}
+
+type gqlThread struct {
+	ID         string    `json:"id"`
+	IsResolved bool      `json:"isResolved"`
+	ResolvedBy *gqlActor `json:"resolvedBy"`
+	Comments   struct {
+		TotalCount int `json:"totalCount"`
+		Nodes      []struct {
+			ID           string    `json:"id"`
+			Author       *gqlActor `json:"author"`
+			Body         string    `json:"body"`
+			URL          string    `json:"url"`
+			CreatedAt    time.Time `json:"createdAt"`
+			Path         string    `json:"path"`
+			Line         *int      `json:"line"`
+			OriginalLine *int      `json:"originalLine"`
+			State        string    `json:"state"`
+			ReplyTo      *struct {
+				ID string `json:"id"`
+			} `json:"replyTo"`
+			OriginalCommit *gqlCommit   `json:"originalCommit"`
+			Reactions      gqlReactions `json:"reactionGroups"`
 		} `json:"nodes"`
-	} `json:"reviewThreads"`
+	} `json:"comments"`
 }
 
 // gqlCheckContext is either a CheckRun (name, status, conclusion, detailsUrl) or a StatusContext
@@ -350,10 +419,13 @@ func (p *gqlPR) toModel(key model.PRKey, fetchedAt time.Time) model.PR {
 			continue
 		}
 		author := login(r.Author)
-		pr.Reviews = append(pr.Reviews, model.Review{ID: r.ID, Author: author, State: r.State, SubmittedAt: r.SubmittedAt})
+		pr.Reviews = append(pr.Reviews, model.Review{
+			ID: r.ID, Author: author, State: r.State, SubmittedAt: r.SubmittedAt, CommitSHA: r.Commit.sha(),
+		})
 		if strings.TrimSpace(r.Body) != "" {
 			pr.Comments = append(pr.Comments, model.Comment{
 				ID: r.ID, Kind: model.CommentReview, Author: author, Body: r.Body, URL: r.URL, CreatedAt: r.SubmittedAt,
+				ViewerReactions: r.Reactions.viewer(),
 			})
 		}
 	}
@@ -361,16 +433,19 @@ func (p *gqlPR) toModel(key model.PRKey, fetchedAt time.Time) model.PR {
 	for _, c := range p.Comments.Nodes {
 		pr.Comments = append(pr.Comments, model.Comment{
 			ID: c.ID, Kind: model.CommentIssue, Author: login(c.Author), Body: c.Body, URL: c.URL, CreatedAt: c.CreatedAt,
+			ViewerReactions: c.Reactions.viewer(),
 		})
 	}
 	for _, t := range p.ReviewThreads.Nodes {
+		var inline []model.Comment
 		for _, c := range t.Comments.Nodes {
 			if c.State == "PENDING" {
 				continue
 			}
 			cm := model.Comment{
 				ID: c.ID, Kind: model.CommentInline, Author: login(c.Author), Body: c.Body, URL: c.URL,
-				Path: c.Path, CreatedAt: c.CreatedAt,
+				Path: c.Path, ThreadID: t.ID, CommitSHA: c.OriginalCommit.sha(), CreatedAt: c.CreatedAt,
+				ViewerReactions: c.Reactions.viewer(),
 			}
 			switch {
 			case c.Line != nil:
@@ -381,8 +456,17 @@ func (p *gqlPR) toModel(key model.PRKey, fetchedAt time.Time) model.PR {
 			if c.ReplyTo != nil {
 				cm.ReplyTo = c.ReplyTo.ID
 			}
-			pr.Comments = append(pr.Comments, cm)
+			inline = append(inline, cm)
 		}
+		if len(inline) == 0 && len(t.Comments.Nodes) > 0 {
+			continue // only the viewer's unsent draft comments
+		}
+		pr.Comments = append(pr.Comments, inline...)
+		rt := model.ReviewThread{ID: t.ID, IsResolved: t.IsResolved}
+		if t.ResolvedBy != nil {
+			rt.ResolvedBy = login(t.ResolvedBy)
+		}
+		pr.ReviewThreads = append(pr.ReviewThreads, rt)
 	}
 	slices.SortStableFunc(pr.Comments, func(a, b model.Comment) int { return a.CreatedAt.Compare(b.CreatedAt) })
 	return pr

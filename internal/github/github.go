@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"slices"
@@ -36,6 +37,7 @@ type Client struct {
 	// baseURL is the REST API root with a trailing slash; GraphQL is served at baseURL+"graphql".
 	baseURL string
 	now     func() time.Time
+	log     *slog.Logger
 }
 
 // NewClient authenticates with the github.com token of the gh CLI.
@@ -52,7 +54,14 @@ func newClient(opts api.ClientOptions, baseURL string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create github http client: %w", err)
 	}
-	return &Client{http: hc, baseURL: baseURL, now: time.Now}, nil
+	return &Client{http: hc, baseURL: baseURL, now: time.Now, log: slog.Default()}, nil
+}
+
+// SetLogger sets where warnings about truncated results go; the default is slog.Default().
+func (c *Client) SetLogger(l *slog.Logger) {
+	if l != nil {
+		c.log = l
+	}
 }
 
 // Viewer returns the authenticated user and the teams ("org/slug") they belong to.
@@ -265,7 +274,8 @@ func ownerRepo(repoURL string) (owner, repo string, ok bool) {
 	return owner, repo, ok && owner != "" && repo != "" && !strings.Contains(repo, "/")
 }
 
-// FetchPR fetches a full snapshot including reviews, review requests, check runs and the most recent comments.
+// FetchPR fetches a full snapshot including reviews, review requests, check runs, all review threads
+// and the most recent comments.
 func (c *Client) FetchPR(ctx context.Context, key model.PRKey) (model.PR, error) {
 	var data struct {
 		Repository *struct {
@@ -284,8 +294,55 @@ func (c *Client) FetchPR(ctx context.Context, key model.PRKey) (model.PR, error)
 	if data.Repository == nil || data.Repository.PullRequest == nil {
 		return model.PR{}, fmt.Errorf("fetch %s: %w", key, ErrNotFound)
 	}
+	pr := data.Repository.PullRequest
+	if err := c.fetchRemainingThreads(ctx, key, pr); err != nil {
+		return model.PR{}, fmt.Errorf("fetch %s: %w", key, err)
+	}
 	canonical := model.PRKey{Owner: data.Repository.Owner.Login, Repo: data.Repository.Name, Number: key.Number}
-	return data.Repository.PullRequest.toModel(canonical, c.now().UTC()), nil
+	c.warnTruncated(canonical, pr)
+	return pr.toModel(canonical, c.now().UTC()), nil
+}
+
+// fetchRemainingThreads appends the review thread pages the PR query did not return.
+func (c *Client) fetchRemainingThreads(ctx context.Context, key model.PRKey, pr *gqlPR) error {
+	for pr.ReviewThreads.PageInfo.HasNextPage {
+		after := pr.ReviewThreads.PageInfo.EndCursor
+		var data struct {
+			Repository *struct {
+				PullRequest *struct {
+					ReviewThreads gqlThreads `json:"reviewThreads"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		}
+		vars := map[string]any{"owner": key.Owner, "repo": key.Repo, "number": key.Number, "after": after}
+		errs, err := c.graphQL(ctx, threadsQuery, vars, &data)
+		if err := queryError(errs, err); err != nil {
+			return fmt.Errorf("fetch review threads: %w", err)
+		}
+		if data.Repository == nil || data.Repository.PullRequest == nil {
+			return fmt.Errorf("fetch review threads: %w", ErrNotFound)
+		}
+		page := data.Repository.PullRequest.ReviewThreads
+		if page.PageInfo.HasNextPage && (page.PageInfo.EndCursor == "" || page.PageInfo.EndCursor == after) {
+			return fmt.Errorf("fetch review threads: cursor %q does not advance", after)
+		}
+		pr.ReviewThreads.Nodes = append(pr.ReviewThreads.Nodes, page.Nodes...)
+		pr.ReviewThreads.PageInfo = page.PageInfo
+	}
+	return nil
+}
+
+// warnTruncated logs the lists the snapshot holds only a part of: the most recent 100 PR comments
+// and the first 50 comments of a review thread.
+func (c *Client) warnTruncated(key model.PRKey, pr *gqlPR) {
+	if n := pr.Comments.TotalCount; n > len(pr.Comments.Nodes) {
+		c.log.Warn("pull request comments truncated", "pr", key.String(), "fetched", len(pr.Comments.Nodes), "total", n)
+	}
+	for _, t := range pr.ReviewThreads.Nodes {
+		if n := t.Comments.TotalCount; n > len(t.Comments.Nodes) {
+			c.log.Warn("review thread comments truncated", "pr", key.String(), "thread", t.ID, "fetched", len(t.Comments.Nodes), "total", n)
+		}
+	}
 }
 
 // queryError turns the outcome of graphQL into an error for callers that reject partial results. It

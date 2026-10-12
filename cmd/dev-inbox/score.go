@@ -21,8 +21,6 @@ type scoreTerm struct {
 var scoreTerms = []scoreTerm{
 	{"urgent", func(w *derive.Weights) *int { return &w.Urgent },
 		"Points when a PR-level " + derive.UrgencyKey + " annotation exists"},
-	{"preferred-team", func(w *derive.Weights) *int { return &w.PreferredTeam },
-		"Points when the author is a member of the preferred team"},
 	{"greylist", func(w *derive.Weights) *int { return &w.Greylist },
 		"Points when the author is greylisted"},
 	{"direct", func(w *derive.Weights) *int { return &w.Direct },
@@ -35,6 +33,18 @@ var scoreTerms = []scoreTerm{
 		"Points per failing check"},
 	{"merge-conflict", func(w *derive.Weights) *int { return &w.MergeConflict },
 		"Points when the PR has merge conflicts"},
+	{"draft", func(w *derive.Weights) *int { return &w.Draft },
+		"Points when the PR is a draft"},
+	{"needs-me", func(w *derive.Weights) *int { return &w.NeedsMe },
+		"Points when another author's PR has an attention reason; such PRs are never hidden"},
+	{"rereview", func(w *derive.Weights) *int { return &w.Rereview },
+		"Points when another author's PR changed since your review"},
+	{"thread-reply", func(w *derive.Weights) *int { return &w.ThreadReply },
+		"Points when someone replied in a review thread you started or joined"},
+	{"mentioned", func(w *derive.Weights) *int { return &w.Mentioned },
+		"Points when someone mentioned you after your last activity"},
+	{"team-review", func(w *derive.Weights) *int { return &w.TeamReview },
+		"Points when a review is requested from one of your teams and the PR waits for a reviewer"},
 }
 
 // scoreWeights overlays the values of the serve.score section on derive.DefaultWeights. Keys that are not

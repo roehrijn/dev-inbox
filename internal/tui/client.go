@@ -5,20 +5,36 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"slices"
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/micro"
 
 	"github.com/roehrijn/dev-inbox/internal/api"
 	"github.com/roehrijn/dev-inbox/internal/model"
 )
 
-const requestTimeout = 5 * time.Second
+const (
+	requestTimeout = 5 * time.Second
+	// pluginPingWindow is how long replies to a service ping are collected.
+	pluginPingWindow = 250 * time.Millisecond
+	pingSubject      = micro.APIPrefix + ".PING"
+)
+
+// serviceName is what micro.AddService accepts as a name. Replies are not checked against it
+// by NATS, and the name is drawn to the terminal, so anything else is ignored.
+var serviceName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // backend is the daemon API as seen by the model; client implements it over NATS.
 type backend interface {
 	List(ctx context.Context) (api.ListResponse, error)
 	Get(ctx context.Context, key model.PRKey) (api.GetResponse, error)
+	// Annotate sets a; a JSON null value deletes it.
+	Annotate(ctx context.Context, a model.Annotation) error
+	// Plugins returns the sorted names of the NATS micro services that answer a ping, none on any failure.
+	Plugins(ctx context.Context) []string
 }
 
 type client struct {
@@ -69,6 +85,47 @@ func (c *client) Get(ctx context.Context, key model.PRKey) (api.GetResponse, err
 		return resp, fmt.Errorf("%s not found", key)
 	}
 	return resp, nil
+}
+
+func (c *client) Annotate(ctx context.Context, a model.Annotation) error {
+	var resp api.AnnotateResponse
+	if err := c.request(ctx, api.SubjectAnnotate, api.AnnotateRequest{Annotation: a}, &resp); err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return errors.New(resp.Error)
+	}
+	return nil
+}
+
+func (c *client) Plugins(ctx context.Context) []string {
+	if !c.nc.IsConnected() {
+		return nil
+	}
+	sub, err := c.nc.SubscribeSync(c.nc.NewInbox())
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+	if err := c.nc.PublishRequest(pingSubject, sub.Subject, nil); err != nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, pluginPingWindow)
+	defer cancel()
+	var names []string
+	for {
+		msg, err := sub.NextMsgWithContext(ctx)
+		if err != nil {
+			break
+		}
+		var ping micro.Ping
+		if json.Unmarshal(msg.Data, &ping) == nil && serviceName.MatchString(ping.Name) && !slices.Contains(names, ping.Name) {
+			names = append(names, ping.Name)
+		}
+	}
+	slices.Sort(names)
+	return names
 }
 
 func (c *client) request(ctx context.Context, subject string, req, resp any) error {

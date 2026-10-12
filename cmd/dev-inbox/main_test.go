@@ -87,11 +87,14 @@ func defaultServeConfig() daemon.Config {
 	}
 }
 
-// sameConfig compares configs ignoring the logger and the nil-ness of the greylist.
+// sameConfig compares configs ignoring the logger and the nil-ness of the greylist and the teams.
 func sameConfig(got, want daemon.Config) bool {
 	got.Logger, want.Logger = nil, nil
 	if len(got.Greylist) == 0 && len(want.Greylist) == 0 {
 		got.Greylist, want.Greylist = nil, nil
+	}
+	if len(got.PreferredTeams) == 0 && len(want.PreferredTeams) == 0 {
+		got.PreferredTeams, want.PreferredTeams = nil, nil
 	}
 	return reflect.DeepEqual(got, want)
 }
@@ -115,14 +118,33 @@ func TestServe(t *testing.T) {
 			wantDebug: true,
 		},
 		{
-			name: "preferred team",
-			args: []string{"--preferred-team", "acme-co/control-plane"},
-			want: func(c *daemon.Config) { c.PreferredTeam = "acme-co/control-plane" },
+			name: "one preferred team",
+			args: []string{"--preferred-teams", "acme-co/control-plane=30"},
+			want: func(c *daemon.Config) { c.PreferredTeams = map[string]int{"acme-co/control-plane": 30} },
 		},
 		{
-			name: "empty preferred team disables the feature",
-			args: []string{"--preferred-team", ""},
-			want: func(*daemon.Config) {},
+			name: "several preferred teams in one flag",
+			args: []string{"--preferred-teams", "acme-co/control-plane=30,acme-co/eng=10"},
+			want: func(c *daemon.Config) {
+				c.PreferredTeams = map[string]int{"acme-co/control-plane": 30, "acme-co/eng": 10}
+			},
+		},
+		{
+			name: "repeated preferred teams flag merges",
+			args: []string{"--preferred-teams", "acme-co/control-plane=30", "--preferred-teams", "acme-co/eng=10,acme/x=1"},
+			want: func(c *daemon.Config) {
+				c.PreferredTeams = map[string]int{"acme-co/control-plane": 30, "acme-co/eng": 10, "acme/x": 1}
+			},
+		},
+		{
+			name: "later points of a repeated team win",
+			args: []string{"--preferred-teams", "acme-co/eng=10", "--preferred-teams", "acme-co/eng=20"},
+			want: func(c *daemon.Config) { c.PreferredTeams = map[string]int{"acme-co/eng": 20} },
+		},
+		{
+			name: "negative and zero points are accepted",
+			args: []string{"--preferred-teams", "acme/noisy=-15,acme/neutral=0"},
+			want: func(c *daemon.Config) { c.PreferredTeams = map[string]int{"acme/noisy": -15, "acme/neutral": 0} },
 		},
 		{
 			name: "greylist replaces defaults",
@@ -160,9 +182,14 @@ func TestServeUsageErrors(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"team without org", []string{"serve", "--preferred-team", "control-plane"}},
-		{"team without slug", []string{"serve", "--preferred-team", "acme-co/"}},
-		{"team with extra segment", []string{"serve", "--preferred-team", "acme-co/a/b"}},
+		{"team without org", []string{"serve", "--preferred-teams", "control-plane=1"}},
+		{"team without slug", []string{"serve", "--preferred-teams", "acme-co/=1"}},
+		{"team with extra segment", []string{"serve", "--preferred-teams", "acme-co/a/b=1"}},
+		{"team without points", []string{"serve", "--preferred-teams", "acme-co/eng"}},
+		{"fractional points", []string{"serve", "--preferred-teams", "acme-co/eng=1.5"}},
+		{"word points", []string{"serve", "--preferred-teams", "acme-co/eng=many"}},
+		{"empty value", []string{"serve", "--preferred-teams="}},
+		{"old flag", []string{"serve", "--preferred-team", "acme-co/eng"}},
 		{"blank greylist login", []string{"serve", "--greylist", " "}},
 		{"empty greylist login", []string{"serve", "--greylist", "a,,b"}},
 		{"invalid log level", []string{"serve", "--log-level", "loud"}},
@@ -272,7 +299,7 @@ func TestHelp(t *testing.T) {
 		{args: []string{"-h"}, want: []string{"serve", "config"}},
 		{args: []string{"serve", "-h"}, want: []string{
 			"--state-dir", "--nats-host", "--nats-port", "--poll-interval", "--reconcile-interval", "--log-level",
-			"--preferred-team", "--greylist", "(default [dependabot,renovate])", "--config"}},
+			"--preferred-teams", "org/slug=points", "--greylist", "(default [dependabot,renovate])", "--config"}},
 		{args: []string{"config", "--help"}, want: []string{"create"}},
 		{args: []string{"config"}, want: []string{"create"}},
 		{args: []string{"config", "create", "-h"}, want: []string{"dev-inbox config create >"}},

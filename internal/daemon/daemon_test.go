@@ -45,6 +45,7 @@ type fakeGitHub struct {
 	fetchHook     func(model.PRKey)       // runs at the start of FetchPR, outside the lock
 	teams         map[string][]string     // members by "org/slug"; other teams are not found
 	teamErr       error                   // returned by TeamMembers instead of the members
+	teamErrs      map[string]error        // like teamErr, for a single team
 	calls         []ghCall
 }
 
@@ -55,6 +56,7 @@ func newFake(prs ...model.PR) *fakeGitHub {
 		search:    map[string][]model.PRKey{},
 		fetchErrs: map[model.PRKey][]error{},
 		teams:     map[string][]string{},
+		teamErrs:  map[string]error{},
 	}
 	for _, pr := range prs {
 		f.prs[pr.Key] = pr
@@ -131,6 +133,9 @@ func (f *fakeGitHub) TeamMembers(_ context.Context, team string) ([]string, erro
 	f.record(ghCall{method: "TeamMembers", query: team})
 	if f.teamErr != nil {
 		return nil, f.teamErr
+	}
+	if err := f.teamErrs[team]; err != nil {
+		return nil, err
 	}
 	members, ok := f.teams[team]
 	if !ok {
