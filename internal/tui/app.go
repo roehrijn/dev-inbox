@@ -156,6 +156,9 @@ type app struct {
 	flash    string
 	flashErr bool
 	flashSeq int
+
+	// picker is the open link picker, nil while closed.
+	picker *linkPicker
 }
 
 func newApp(ctx context.Context, be backend, natsURL string) *app {
@@ -177,6 +180,8 @@ func newApp(ctx context.Context, be backend, natsURL string) *app {
 		renderers:  map[rendererKey]*glamour.TermRenderer{},
 		markdown:   map[markdownKey]string{},
 	}
+	// Narrower than the default four spaces so the full help fits 120 columns.
+	a.help.FullSeparator = "   "
 	a.viewport.FillHeight = true
 	for _, id := range displaySections {
 		a.sections = append(a.sections, section{id: id})
@@ -266,6 +271,9 @@ func (a *app) setFlash(text string, isErr bool) tea.Cmd {
 }
 
 func (a *app) handleKey(msg tea.KeyPressMsg) tea.Cmd {
+	if a.picker != nil {
+		return a.handlePickerKey(msg)
+	}
 	k := a.keys
 	sel, hasSel := a.selected()
 	switch {
@@ -315,6 +323,10 @@ func (a *app) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 			a.setCollapsed(sel.sec, false)
 		} else if it := a.selectedItem(); it != nil {
 			return a.openCmd(prURL(it.PR))
+		}
+	case key.Matches(msg, k.OpenLink):
+		if it := a.selectedItem(); it != nil {
+			return a.openLinks(*it)
 		}
 	case key.Matches(msg, k.Copy):
 		if it := a.selectedItem(); it != nil {
@@ -398,9 +410,13 @@ func prURL(pr model.PR) string {
 	return fmt.Sprintf("https://github.com/%s/%s/pull/%d", pr.Key.Owner, pr.Key.Repo, pr.Key.Number)
 }
 
-func openURL(raw string) error {
+func webURL(raw string) bool {
 	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
+	return err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Host != ""
+}
+
+func openURL(raw string) error {
+	if !webURL(raw) {
 		return fmt.Errorf("refusing to open %q", raw)
 	}
 	var cmd *exec.Cmd

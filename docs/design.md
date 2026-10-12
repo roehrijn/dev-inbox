@@ -196,7 +196,11 @@ Failures reply with `{"error": "..."}`.
 - Enrichment: annotations via `devinbox.api.annotate` (or the store from in-process handlers through
   the daemon). Namespaced keys such as `linear.urgency`. A JSON object value with a `badge` string and
   optional `level` (`info`, `warn`, `crit`) is rendered as a badge by the TUI; the detail pane lists
-  all annotations.
+  all annotations. A JSON object value with a `links` array of `{id, title, url, detail}` objects (and an
+  optional `label`, default `Links`) is shown as a section in the TUI details, and its links open with
+  `O` (a picker when several). Example: `linear.issues` is
+  `{"label": "Linear issues", "links": [{"id": "ACME-1", "title": "Fix login", "url": "https://linear.app/acme/issue/ACME-1/fix-login", "detail": "In Progress"}]}`.
+  Neither convention scores by itself; a PR-level `score` or `attention` field in the value does.
 
 Workflow ideas: [ideas.md](ideas.md).
 

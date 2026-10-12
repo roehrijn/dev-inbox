@@ -6,7 +6,8 @@ type keyMap struct {
 	Up, Down, Top, Bottom                  key.Binding
 	NextTab, PrevTab, JumpTab              key.Binding
 	Toggle, Collapse, Expand               key.Binding
-	Open, Copy, Hide, Detail, ToggleAll    key.Binding
+	Open, OpenLink, Copy, Hide             key.Binding
+	Detail, ToggleAll                      key.Binding
 	ScrollUp, ScrollDown, PageUp, PageDown key.Binding
 	Refresh, Help, Back, Quit              key.Binding
 }
@@ -27,7 +28,8 @@ func newKeyMap() keyMap {
 		Toggle:     b([]string{"space"}, "space", "fold section"),
 		Collapse:   b([]string{"h", "left"}, "h", "collapse"),
 		Expand:     b([]string{"l", "right"}, "l", "expand"),
-		Open:       b([]string{"enter", "o"}, "enter/o", "open in browser"),
+		Open:       b([]string{"o"}, "o", "open in browser"),
+		OpenLink:   b([]string{"O"}, "O", "open linked issue"),
 		Copy:       b([]string{"y"}, "y", "copy URL"),
 		Hide:       b([]string{"x"}, "x", "hide until new"),
 		Detail:     b([]string{"d"}, "d", "details"),
@@ -51,7 +53,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Up, k.Down, k.Top, k.Bottom},
 		{k.NextTab, k.PrevTab, k.JumpTab},
 		{k.Toggle, k.Collapse, k.Expand},
-		{k.Open, k.Copy, k.Hide, k.ToggleAll, k.Refresh},
+		{k.Open, k.OpenLink, k.Copy, k.Hide, k.ToggleAll, k.Refresh},
 		{k.Detail, k.ScrollDown, k.ScrollUp, k.PageDown, k.PageUp},
 		{k.Help, k.Back, k.Quit},
 	}

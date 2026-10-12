@@ -102,8 +102,8 @@ therefore retires every plugin contribution on the next ingest, even when the pl
 
 - New `serve.score.*` weights: `needs-me` (+20), `rereview` (+30), `thread-reply` (+15),
   `mentioned` (+20).
-- A `plugins:` namespace the core ignores: skipped by the unknown-key check, and decoded into a
-  `Plugins map[string]any` field so `UnmarshalExact` accepts it.
+- No plugin settings in the core config: each plugin reads its own file next to it, for Jev
+  `$XDG_CONFIG_HOME/dev-inbox/jev.yaml`, and a `plugins:` key in `config.yaml` is an unknown-key error.
 
 ## Plugin: dev-inbox-jev
 
@@ -140,7 +140,7 @@ finding, whether it mentions me.
 
 Below probability 0.6 a result is `unclear`: no contribution, no suppression. Per PR, each intent
 counts once (max per intent, summed across distinct intents), so a chatty PR cannot dominate.
-Weights, threshold and options live in `plugins.jev.*`.
+Weights, threshold and options live in the plugin's own `jev.yaml`.
 
 ### User's example
 
@@ -166,16 +166,16 @@ re-list; fine at this volume, no batch API needed.
 ## Data protection
 
 Comment bodies and PR titles from private repositories leave the machine to TypeSafe AI; make sure that
-is acceptable for your organization. An optional org/repo allowlist (`plugins.jev.repos`, default: all)
+is acceptable for your organization. An optional org/repo allowlist (`repos` in `jev.yaml`, default: all)
 limits what is sent.
 
 ## Phases and tests
 
 1. Core: data model and fetching (commit SHAs, thread resolution, thread pagination), signals,
    annotation contributions with freshness and clamps, `needs-me` bonus, TUI needs-me view and
-   toggle, plugin status, `plugins:` namespace. Tests: derive table tests per signal including
+   toggle, plugin status. Tests: derive table tests per signal including
    last-activity anchoring, null commits, suppression and freshness; github fixtures for the new
-   fields and pagination; TUI tests for the view, toggle and status; config tests for the namespace.
+   fields and pagination; TUI tests for the view, toggle and status; config tests that `plugins:` is rejected.
 2. Plugin: candidate selection, Jev HTTP client (verify the wire format; no Go SDK), PR result
    computation, micro service registration. Tests against a fake Jev server and an embedded NATS.
 3. Tuning: label ~50 real comments, measure accuracy (third-party benchmarks report ~0.78 on intent

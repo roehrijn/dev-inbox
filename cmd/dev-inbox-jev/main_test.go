@@ -37,7 +37,7 @@ func runWith(t *testing.T, getenv func(string) string, args ...string) (jevplugi
 
 func writeConfig(t *testing.T, content string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "config.yaml")
+	path := filepath.Join(t.TempDir(), "jev.yaml")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -64,23 +64,13 @@ func TestDefaults(t *testing.T) {
 
 func TestConfigFile(t *testing.T) {
 	path := writeConfig(t, `
-serve:
-  log-level: debug
-  score:
-    needs-me: 25
-tui:
-  nats-url: nats://tui:4222
-plugins:
-  other:
-    anything: goes
-  jev:
-    nats-url: nats://jev:4222
-    threshold: 0.75
-    weights:
-      question-for-me: 50
-      ack: -5
-    repos: [acme-co, roehrijn/dev-inbox]
-    debounce: 500ms
+nats-url: nats://jev:4222
+threshold: 0.75
+weights:
+  question-for-me: 50
+  ack: -5
+repos: [acme-co, roehrijn/dev-inbox]
+debounce: 500ms
 `)
 	cfg, _, err := runWith(t, withKey, "--config", path)
 	if err != nil {
@@ -96,23 +86,44 @@ plugins:
 	}
 }
 
-func TestNATSURLPrecedence(t *testing.T) {
-	tuiOnly := writeConfig(t, "tui:\n  nats-url: nats://tui:4222\n")
-	cfg, _, err := runWith(t, withKey, "--config", tuiOnly)
-	if err != nil {
-		t.Fatal(err)
+func TestEmptyConfigFile(t *testing.T) {
+	for name, content := range map[string]string{
+		"empty":        "",
+		"comment only": "# nothing\n",
+		"null":         "null\n",
+		"tilde":        "~\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, _, err := runWith(t, withKey, "--config", writeConfig(t, content))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.NATSURL != api.DefaultNATSURL || cfg.Threshold != jevplugin.DefaultThreshold {
+				t.Errorf("got %+v, want the defaults", cfg)
+			}
+		})
 	}
-	if cfg.NATSURL != "nats://tui:4222" {
-		t.Errorf("without plugins.jev.nats-url got %q, want tui.nats-url", cfg.NATSURL)
-	}
+}
 
-	both := writeConfig(t, "tui:\n  nats-url: nats://tui:4222\nplugins:\n  jev:\n    nats-url: nats://jev:4222\n")
-	cfg, _, err = runWith(t, withKey, "--config", both, "--nats-url", "nats://flag:4222")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.NATSURL != "nats://flag:4222" {
-		t.Errorf("with the flag got %q, want the flag", cfg.NATSURL)
+func TestNATSURLPrecedence(t *testing.T) {
+	path := writeConfig(t, "nats-url: nats://jev:4222\n")
+	for name, tt := range map[string]struct {
+		args []string
+		want string
+	}{
+		"config file":      {[]string{"--config", path}, "nats://jev:4222"},
+		"flag over config": {[]string{"--config", path, "--nats-url", "nats://flag:4222"}, "nats://flag:4222"},
+		"default":          {nil, api.DefaultNATSURL},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, _, err := runWith(t, withKey, tt.args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.NATSURL != tt.want {
+				t.Errorf("got %q, want %q", cfg.NATSURL, tt.want)
+			}
+		})
 	}
 }
 
@@ -122,9 +133,13 @@ func TestDefaultConfigPath(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "dev-inbox"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "dev-inbox", "config.yaml"),
-		[]byte("plugins:\n  jev:\n    threshold: 0.9\n"), 0o600); err != nil {
-		t.Fatal(err)
+	for file, content := range map[string]string{
+		"jev.yaml":    "threshold: 0.9\n",
+		"config.yaml": "threshold: 0.1\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, "dev-inbox", file), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var got jevplugin.Config
 	err := run(context.Background(), func(_ context.Context, cfg jevplugin.Config) error {
@@ -135,7 +150,7 @@ func TestDefaultConfigPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Threshold != 0.9 {
-		t.Errorf("threshold %v, want 0.9 from the default config file", got.Threshold)
+		t.Errorf("threshold %v, want 0.9 from jev.yaml", got.Threshold)
 	}
 }
 
@@ -150,20 +165,23 @@ func TestUsageErrors(t *testing.T) {
 		{name: "missing API key", getenv: env(nil), want: []string{"TYPESAFE_API_KEY is not set"}},
 		{name: "explicit config missing", args: []string{"--config", "/nonexistent/config.yaml"},
 			want: []string{"does not exist"}},
-		{name: "unknown keys", config: "plugins:\n  jev:\n    treshold: 0.5\n    weights:\n      questions: 1\n",
-			want: []string{`unknown key "plugins.jev.treshold"`, `unknown key "plugins.jev.weights.questions"`}},
-		{name: "intent name instead of weight key", config: "plugins:\n  jev:\n    weights:\n      question_for_me: 1\n",
-			want: []string{`unknown key "plugins.jev.weights.question_for_me"`}},
-		{name: "threshold out of range", config: "plugins:\n  jev:\n    threshold: 1.5\n",
-			want: []string{"plugins.jev.threshold", "not between 0 and 1"}},
-		{name: "fractional weight", config: "plugins:\n  jev:\n    weights:\n      ack: 1.5\n", want: []string{"1.5"}},
-		{name: "quoted weight", config: "plugins:\n  jev:\n    weights:\n      ack: \"20\"\n", want: []string{"20"}},
-		{name: "debounce without unit", config: "plugins:\n  jev:\n    debounce: 2\n",
-			want: []string{"plugins.jev.debounce", "missing unit"}},
-		{name: "negative debounce", config: "plugins:\n  jev:\n    debounce: -1s\n", want: []string{"negative"}},
-		{name: "invalid repo", config: "plugins:\n  jev:\n    repos: [a/b/c]\n",
-			want: []string{"plugins.jev.repos", `"a/b/c"`}},
-		{name: "section not a mapping", config: "plugins:\n  jev: [1]\n", want: []string{"must be a mapping"}},
+		{name: "unknown keys", config: "treshold: 0.5\nweights:\n  questions: 1\n",
+			want: []string{`unknown key "treshold"`, `unknown key "weights.questions"`}},
+		{name: "intent name instead of weight key", config: "weights:\n  question_for_me: 1\n",
+			want: []string{`unknown key "weights.question_for_me"`}},
+		{name: "core-style plugins section", config: "plugins:\n  jev:\n    threshold: 0.5\n",
+			want: []string{`unknown key "plugins"`}},
+		{name: "core-style tui section", config: "tui:\n  nats-url: nats://tui:4222\n",
+			want: []string{`unknown key "tui"`}},
+		{name: "non-mapping document", config: "[1, 2]\n", want: []string{"the document must be a mapping"}},
+		{name: "scalar document", config: "foo\n", want: []string{"the document must be a mapping"}},
+		{name: "threshold out of range", config: "threshold: 1.5\n",
+			want: []string{"jev.yaml: threshold", "not between 0 and 1"}},
+		{name: "fractional weight", config: "weights:\n  ack: 1.5\n", want: []string{"weights.ack", "1.5"}},
+		{name: "quoted weight", config: "weights:\n  ack: \"20\"\n", want: []string{"weights.ack", "20"}},
+		{name: "debounce without unit", config: "debounce: 2\n", want: []string{"debounce", "missing unit"}},
+		{name: "negative debounce", config: "debounce: -1s\n", want: []string{"negative"}},
+		{name: "invalid repo", config: "repos: [a/b/c]\n", want: []string{"repos", `"a/b/c"`}},
 		{name: "invalid log level", args: []string{"--log-level", "loud"}, want: []string{`invalid log-level "loud"`}},
 		{name: "argument", args: []string{"serve"}, want: []string{`unexpected argument "serve"`}},
 	}

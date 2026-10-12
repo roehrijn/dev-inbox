@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -15,10 +14,9 @@ import (
 	"github.com/roehrijn/dev-inbox/internal/jevplugin"
 )
 
-// settings are the plugin's settings from the config file, with built-in defaults where it has none.
+// settings are the plugin's settings from its config file, with built-in defaults where it has none.
 type settings struct {
-	// NATSURL is plugins.jev.nats-url, else tui.nats-url; empty if the file sets neither.
-	NATSURL   string
+	NATSURL   string // empty if unset
 	LogLevel  string // empty if unset
 	Threshold float64
 	Weights   map[string]int
@@ -26,8 +24,8 @@ type settings struct {
 	Debounce  time.Duration
 }
 
-// jevSection mirrors plugins.jev; checkKeys keeps the two in sync with knownKeys.
-type jevSection struct {
+// fileConfig mirrors the config file; checkKeys keeps it in sync with knownKeys.
+type fileConfig struct {
 	NATSURL   string   `yaml:"nats-url"`
 	LogLevel  string   `yaml:"log-level"`
 	Threshold *float64 `yaml:"threshold"`
@@ -54,8 +52,7 @@ func defaultSettings() settings {
 	return s
 }
 
-// readSettings reads the plugins.jev section and tui.nats-url of the config file at path. A missing
-// file yields the defaults unless explicit is set. Other sections are left to dev-inbox.
+// readSettings reads the config file at path. A missing file yields the defaults unless explicit is set.
 func readSettings(path string, explicit bool) (settings, error) {
 	s := defaultSettings()
 	if path == "" {
@@ -70,45 +67,40 @@ func readSettings(path string, explicit bool) (settings, error) {
 	case err != nil:
 		return s, err
 	}
-	var doc struct {
-		TUI struct {
-			NATSURL string `yaml:"nats-url"`
-		} `yaml:"tui"`
-		Plugins struct {
-			Jev yaml.Node `yaml:"jev"`
-		} `yaml:"plugins"`
-	}
+	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return s, usagef("invalid config %s: %w", path, err)
 	}
-	s.NATSURL = doc.TUI.NATSURL
-	node := &doc.Plugins.Jev
+	node := &doc
+	if node.Kind == yaml.DocumentNode {
+		node = node.Content[0]
+	}
 	if node.Kind == 0 || node.Tag == "!!null" {
 		return s, nil
 	}
 	if node.Kind != yaml.MappingNode {
-		return s, usagef("invalid config %s: plugins.jev must be a mapping", path)
+		return s, usagef("invalid config %s: the document must be a mapping", path)
 	}
 	if err := checkKeys(node, path); err != nil {
 		return s, err
 	}
-	var sec jevSection
-	if err := node.Decode(&sec); err != nil {
-		return s, usagef("invalid config %s: plugins.jev: %w", path, err)
+	var cfg fileConfig
+	if err := node.Decode(&cfg); err != nil {
+		return s, usagef("invalid config %s: %w", path, err)
 	}
-	if err := apply(&s, sec); err != nil {
-		return s, usagef("invalid config %s: plugins.jev.%w", path, err)
+	if err := apply(&s, cfg); err != nil {
+		return s, usagef("invalid config %s: %w", path, err)
 	}
 	return s, nil
 }
 
-// checkKeys rejects unknown keys of plugins.jev and plugins.jev.weights, which catches typos.
+// checkKeys rejects unknown top-level keys and unknown keys of weights, which catches typos.
 func checkKeys(node *yaml.Node, path string) error {
 	var errs []error
 	for i := 0; i+1 < len(node.Content); i += 2 {
 		key, val := node.Content[i], node.Content[i+1]
 		if !slices.Contains(knownKeys, key.Value) {
-			errs = append(errs, fmt.Errorf("invalid config %s: unknown key %q", path, "plugins.jev."+key.Value))
+			errs = append(errs, fmt.Errorf("invalid config %s: unknown key %q", path, key.Value))
 			continue
 		}
 		if key.Value != "weights" || val.Kind != yaml.MappingNode {
@@ -117,7 +109,7 @@ func checkKeys(node *yaml.Node, path string) error {
 		for j := 0; j+1 < len(val.Content); j += 2 {
 			w := val.Content[j].Value
 			if !slices.ContainsFunc(jevplugin.Intents, func(in string) bool { return weightKey(in) == w }) {
-				errs = append(errs, fmt.Errorf("invalid config %s: unknown key %q", path, "plugins.jev.weights."+w))
+				errs = append(errs, fmt.Errorf("invalid config %s: unknown key %q", path, "weights."+w))
 			}
 		}
 	}
@@ -127,20 +119,20 @@ func checkKeys(node *yaml.Node, path string) error {
 	return nil
 }
 
-// apply validates sec and sets what it configures. Errors name the offending key.
-func apply(s *settings, sec jevSection) error {
-	if sec.NATSURL != "" {
-		s.NATSURL = sec.NATSURL
+// apply validates cfg and sets what it configures. Errors name the offending key.
+func apply(s *settings, cfg fileConfig) error {
+	if cfg.NATSURL != "" {
+		s.NATSURL = cfg.NATSURL
 	}
-	s.LogLevel = sec.LogLevel
-	if t := sec.Threshold; t != nil {
+	s.LogLevel = cfg.LogLevel
+	if t := cfg.Threshold; t != nil {
 		if *t < 0 || *t > 1 {
 			return fmt.Errorf("threshold: %v is not between 0 and 1", *t)
 		}
 		s.Threshold = *t
 	}
 	for _, in := range jevplugin.Intents {
-		node, ok := sec.Weights[weightKey(in)]
+		node, ok := cfg.Weights[weightKey(in)]
 		if !ok {
 			continue
 		}
@@ -150,19 +142,19 @@ func apply(s *settings, sec jevSection) error {
 		}
 		s.Weights[in] = w
 	}
-	for _, r := range sec.Repos {
+	for _, r := range cfg.Repos {
 		if err := validateRepo(r); err != nil {
 			return fmt.Errorf("repos: %w", err)
 		}
 	}
-	s.Repos = sec.Repos
-	if sec.Debounce != "" {
-		d, err := time.ParseDuration(sec.Debounce)
+	s.Repos = cfg.Repos
+	if cfg.Debounce != "" {
+		d, err := time.ParseDuration(cfg.Debounce)
 		if err != nil {
 			return fmt.Errorf("debounce: %w", err)
 		}
 		if d < 0 {
-			return fmt.Errorf("debounce: %s is negative", sec.Debounce)
+			return fmt.Errorf("debounce: %s is negative", cfg.Debounce)
 		}
 		s.Debounce = d
 	}
@@ -176,18 +168,4 @@ func validateRepo(r string) error {
 		return fmt.Errorf("%q is not of the form org or org/repo", r)
 	}
 	return nil
-}
-
-// defaultConfigPath returns $XDG_CONFIG_HOME/dev-inbox/config.yaml, or ~/.config/dev-inbox/config.yaml when unset,
-// like dev-inbox. It returns "" if the home directory is unknown, which leaves no default file to read.
-func defaultConfigPath() string {
-	dir := os.Getenv("XDG_CONFIG_HOME")
-	if !filepath.IsAbs(dir) {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return ""
-		}
-		dir = filepath.Join(home, ".config")
-	}
-	return filepath.Join(dir, "dev-inbox", "config.yaml")
 }

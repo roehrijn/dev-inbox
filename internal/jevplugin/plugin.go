@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/nats-io/nats.go/micro"
 
@@ -23,6 +22,7 @@ import (
 	"github.com/roehrijn/dev-inbox/internal/derive"
 	"github.com/roehrijn/dev-inbox/internal/jev"
 	"github.com/roehrijn/dev-inbox/internal/model"
+	"github.com/roehrijn/dev-inbox/internal/pluginkit"
 )
 
 const (
@@ -37,7 +37,6 @@ const (
 	DefaultThreshold = 0.6
 	DefaultDebounce  = 2 * time.Second
 
-	requestTimeout = 10 * time.Second
 	// ackWait covers the debounce, waiting for other evaluations and a Jev call with retries;
 	// evaluation also signals progress when it starts.
 	ackWait    = 2 * time.Minute
@@ -68,13 +67,7 @@ var triggers = []string{
 }
 
 // FilterSubjects are the subjects of the trigger events, see api.EventSubject.
-func FilterSubjects() []string {
-	out := make([]string, len(triggers))
-	for i, t := range triggers {
-		out[i] = "devinbox.events.pr.*.*.*." + strings.TrimPrefix(t, "pr.")
-	}
-	return out
-}
+func FilterSubjects() []string { return pluginkit.FilterSubjects(triggers) }
 
 type Config struct {
 	NATSURL string
@@ -92,7 +85,7 @@ type Config struct {
 type plugin struct {
 	cfg    Config
 	log    *slog.Logger
-	nc     *nats.Conn
+	c      *pluginkit.Client
 	viewer model.Viewer
 
 	// evalMu serializes evaluations, so one PR is never annotated concurrently.
@@ -136,19 +129,14 @@ func newPlugin(cfg Config) *plugin {
 }
 
 func (p *plugin) run(ctx context.Context) error {
-	nc, err := nats.Connect(p.cfg.NATSURL,
-		nats.Name(Source),
-		nats.RetryOnFailedConnect(true),
-		nats.MaxReconnects(-1),
-		nats.ReconnectWait(time.Second),
-	)
+	c, err := pluginkit.Connect(p.cfg.NATSURL, Source, p.log)
 	if err != nil {
-		return fmt.Errorf("connect to %s: %w", p.cfg.NATSURL, err)
+		return err
 	}
-	p.nc = nc
-	defer func() { _ = nc.Drain() }()
+	p.c = c
+	defer c.Close()
 
-	svc, err := micro.AddService(nc, micro.Config{
+	svc, err := micro.AddService(c.Conn(), micro.Config{
 		Name:        ServiceName,
 		Version:     serviceVersion,
 		Description: "Classifies comments on others' PRs with TypeSafe Jev",
@@ -158,7 +146,7 @@ func (p *plugin) run(ctx context.Context) error {
 	}
 	defer func() { _ = svc.Stop() }()
 
-	list, ok := p.awaitDaemon(ctx)
+	list, ok := c.AwaitDaemon(ctx)
 	if !ok {
 		return nil
 	}
@@ -182,34 +170,12 @@ func (p *plugin) run(ctx context.Context) error {
 	return nil
 }
 
-// awaitDaemon lists the inbox, retrying until the daemon answers or ctx ends.
-func (p *plugin) awaitDaemon(ctx context.Context) (api.ListResponse, bool) {
-	delay := time.Second
-	for {
-		var resp api.ListResponse
-		err := p.request(ctx, api.SubjectList, api.ListRequest{}, &resp)
-		if err == nil && resp.Error != "" {
-			err = errors.New(resp.Error)
-		}
-		if err == nil {
-			return resp, true
-		}
-		p.log.Warn("list inbox, is `dev-inbox serve` running?", "err", err, "retry_in_ms", delay.Milliseconds())
-		select {
-		case <-ctx.Done():
-			return resp, false
-		case <-time.After(delay):
-		}
-		delay = min(2*delay, 30*time.Second)
-	}
-}
-
 func (p *plugin) consume(ctx context.Context) (jetstream.ConsumeContext, error) {
-	js, err := jetstream.New(p.nc)
+	js, err := jetstream.New(p.c.Conn())
 	if err != nil {
 		return nil, fmt.Errorf("jetstream: %w", err)
 	}
-	cctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	cctx, cancel := context.WithTimeout(ctx, pluginkit.RequestTimeout)
 	defer cancel()
 	// Update, not just create, so a changed FilterSubjects reaches the consumer of an earlier run.
 	cons, err := js.CreateOrUpdateConsumer(cctx, api.StreamName, jetstream.ConsumerConfig{
@@ -237,7 +203,7 @@ func (p *plugin) consume(ctx context.Context) (jetstream.ConsumeContext, error) 
 
 // receive adds an event to its PR's batch and (re)starts the PR's debounce timer.
 func (p *plugin) receive(ctx context.Context, msg jetstream.Msg) {
-	key, err := eventKey(msg.Data())
+	key, err := pluginkit.EventKey(msg.Data())
 	if err != nil {
 		p.log.Error("dropping undecodable event", "subject", msg.Subject(), "err", err)
 		if err := msg.TermWithReason("undecodable event"); err != nil {
@@ -300,48 +266,13 @@ func (p *plugin) fire(ctx context.Context, key model.PRKey) {
 			_ = m.Nak()
 			continue
 		}
-		p.settle(m, key, err)
-	}
-}
-
-// settle acks msg after a successful evaluation, and otherwise redelivers it with backoff until
-// maxDeliver deliveries.
-func (p *plugin) settle(msg jetstream.Msg, key model.PRKey, evalErr error) {
-	log := p.log.With("pr", key.String(), "subject", msg.Subject())
-	if evalErr == nil {
-		if err := msg.Ack(); err != nil {
-			log.Warn("ack event", "err", err)
-		}
-		return
-	}
-	md, err := msg.Metadata()
-	if err != nil {
-		log.Error("evaluation failed, redelivering", "err", evalErr, "metadata_err", err)
-		_ = msg.Nak()
-		return
-	}
-	if md.NumDelivered >= maxDeliver {
-		log.Error("evaluation failed, dropping event", "deliveries", md.NumDelivered, "err", evalErr)
-		if err := msg.TermWithReason("max deliveries reached"); err != nil {
-			log.Warn("terminate event", "err", err)
-		}
-		return
-	}
-	delay := p.retryDelay(int(md.NumDelivered))
-	log.Warn("evaluation failed, redelivering", "deliveries", md.NumDelivered,
-		"retry_in_ms", delay.Milliseconds(), "err", evalErr)
-	if err := msg.NakWithDelay(delay); err != nil {
-		log.Warn("nak event", "err", err)
+		pluginkit.Settle(p.log.With("pr", key.String()), m, err, p.retryDelay, maxDeliver)
 	}
 }
 
 // retryDelay doubles retryBase per previous attempt, capped at retryMax.
 func (p *plugin) retryDelay(attempt int) time.Duration {
-	d := p.retryBase
-	for i := 1; i < attempt && d < p.retryMax; i++ {
-		d *= 2
-	}
-	return min(d, p.retryMax)
+	return pluginkit.Backoff(p.retryBase, p.retryMax, attempt)
 }
 
 // stop discards pending batches; their events are redelivered to the next run.
@@ -424,17 +355,10 @@ func (p *plugin) evaluate(ctx context.Context, key model.PRKey) error {
 }
 
 func (p *plugin) evaluateLocked(ctx context.Context, log *slog.Logger, key model.PRKey) error {
-	var resp api.GetResponse
-	if err := p.request(ctx, api.SubjectGet, api.GetRequest{PR: key}, &resp); err != nil {
+	item, err := p.c.Get(ctx, key)
+	if err != nil {
 		return err
 	}
-	if resp.Error != "" {
-		return fmt.Errorf("get %s: %s", key, resp.Error)
-	}
-	if resp.Item == nil {
-		return fmt.Errorf("get %s: no item", key)
-	}
-	item := *resp.Item
 	if !foreign(item) {
 		log.Debug("skipping PR that is not someone else's open PR", "section", item.Section)
 		return nil
@@ -470,7 +394,7 @@ func (p *plugin) evaluateLocked(ctx context.Context, log *slog.Logger, key model
 			if err != nil {
 				return err
 			}
-			if err := p.annotate(ctx, model.Annotation{PR: key, CommentID: c.ID, Key: KeyIntent, Value: raw}); err != nil {
+			if err := p.c.Annotate(ctx, model.Annotation{PR: key, CommentID: c.ID, Key: KeyIntent, Value: raw}); err != nil {
 				return err
 			}
 			values[c.ID] = v
@@ -516,7 +440,7 @@ func (p *plugin) updateAttention(ctx context.Context, log *slog.Logger, item api
 			return nil
 		}
 		log.Info("PR needs nothing", "key", KeyAttention)
-		return p.annotate(ctx, ann)
+		return p.c.Annotate(ctx, ann)
 	}
 	if i >= 0 {
 		var have attentionValue
@@ -532,59 +456,5 @@ func (p *plugin) updateAttention(ctx context.Context, log *slog.Logger, item api
 	}
 	ann.Value = raw
 	log.Info("PR needs attention", "score", want.Score, "reasons", want.Attention)
-	return p.annotate(ctx, ann)
-}
-
-func (p *plugin) annotate(ctx context.Context, a model.Annotation) error {
-	a.Source = Source
-	var resp api.AnnotateResponse
-	if err := p.request(ctx, api.SubjectAnnotate, api.AnnotateRequest{Annotation: a}, &resp); err != nil {
-		return err
-	}
-	if resp.Error != "" {
-		return fmt.Errorf("annotate %s %s: %s", a.PR, a.Key, resp.Error)
-	}
-	return nil
-}
-
-func (p *plugin) request(ctx context.Context, subject string, req, resp any) error {
-	// While reconnecting, NATS buffers requests until they time out; fail fast instead.
-	if !p.nc.IsConnected() {
-		return fmt.Errorf("request %s: not connected to %s", subject, p.cfg.NATSURL)
-	}
-	data, err := json.Marshal(req)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
-	defer cancel()
-	msg, err := p.nc.RequestWithContext(ctx, subject, data)
-	if err != nil {
-		return fmt.Errorf("request %s: %w", subject, err)
-	}
-	if err := json.Unmarshal(msg.Data, resp); err != nil {
-		return fmt.Errorf("decode %s response: %w", subject, err)
-	}
-	return nil
-}
-
-// eventKey returns the PR of a CloudEvent carrying model.EventData.
-func eventKey(data []byte) (model.PRKey, error) {
-	var ce api.CloudEvent
-	if err := json.Unmarshal(data, &ce); err != nil {
-		return model.PRKey{}, err
-	}
-	var ed struct {
-		PR struct {
-			Key model.PRKey `json:"key"`
-		} `json:"pr"`
-	}
-	if err := json.Unmarshal(ce.Data, &ed); err != nil {
-		return model.PRKey{}, err
-	}
-	k := ed.PR.Key
-	if k.Owner == "" || k.Repo == "" || k.Number == 0 {
-		return model.PRKey{}, fmt.Errorf("event %s has no PR key", ce.ID)
-	}
-	return k, nil
+	return p.c.Annotate(ctx, ann)
 }

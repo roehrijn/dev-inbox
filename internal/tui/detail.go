@@ -211,6 +211,7 @@ func (a *app) renderPR(it api.InboxItem, full bool, loadErr error, w int) string
 		commentIDs[c.ID] = true
 	}
 	a.writeScore(&b, it, w)
+	a.writeLinks(&b, it.Annotations, w)
 	a.writeAnnotations(&b, it.Annotations, commentIDs, w)
 	a.writeChecks(&b, pr, w)
 	a.writeReviews(&b, pr, w)
@@ -283,11 +284,13 @@ func (a *app) writeScore(b *strings.Builder, it api.InboxItem, w int) {
 
 // writeAnnotations lists PR-level annotations and those of comments that are not shown. The
 // hidden mark is left out: the section already says the PR is hidden, its value is bookkeeping.
+// Links annotations have sections of their own.
 func (a *app) writeAnnotations(b *strings.Builder, anns []model.Annotation, shownComments map[string]bool, w int) {
 	var list []model.Annotation
 	for _, ann := range anns {
+		_, isLinks := parseLinks(ann)
 		switch {
-		case ann.CommentID == "" && ann.Key == derive.HiddenKey:
+		case ann.CommentID == "" && (ann.Key == derive.HiddenKey || isLinks):
 		case ann.CommentID == "" || !shownComments[ann.CommentID]:
 			list = append(list, ann)
 		}
