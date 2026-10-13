@@ -133,7 +133,10 @@ value is a `derive.HiddenMark` of the snapshot the viewer saw, built by `derive.
 - the head is unchanged (new commits, a rebase or a force-push change it),
 - the PR was not marked ready for review (`draft` true, now false),
 - review was not newly requested from the viewer personally (`requested` false, now `Direct`),
-- no comment or review by someone other than the viewer, a bot or a greylisted login is newer than `seen`.
+- no comment or review by someone other than the viewer, a bot or a greylisted login is newer than `seen`,
+- no PR-level annotation with a non-empty `attention` list was updated after the hide annotation itself
+  (its `UpdatedAt`, not `seen`). This holds for every plugin; plugins write only on change, so an unchanged
+  annotation does not undo a hide.
 
 Checks, mergeability, labels, reactions and the viewer's own activity are not new. Using the snapshot's
 `FetchedAt` rather than the time of hiding means activity the daemon had not fetched yet when the viewer hid
@@ -189,6 +192,7 @@ existing comments. During backfill the daemon keeps only `pr.discovered`.
 | `devinbox.api.inbox.list` | `ListRequest` | `ListResponse`: viewer + all open tracked PRs, no comments, PR-level annotations |
 | `devinbox.api.pr.get` | `GetRequest` | `GetResponse`: one PR with comments and all annotations |
 | `devinbox.api.annotate` | `AnnotateRequest` | `AnnotateResponse`; JSON null value deletes |
+| `devinbox.api.pr.track` | `TrackRequest` | `TrackResponse`: unknown PR is queued for ingestion and replied to at once (`pr.discovered` follows), known PR is a no-op with `known: true` |
 
 Failures reply with `{"error": "..."}`.
 
@@ -201,9 +205,14 @@ Failures reply with `{"error": "..."}`.
   optional `level` (`info`, `warn`, `crit`) is rendered as a badge by the TUI; the detail pane lists
   all annotations. A JSON object value with a `links` array of `{id, title, url, detail}` objects (and an
   optional `label`, default `Links`) is shown as a section in the TUI details, and its links open with
-  `O` (a picker when several). Example: `linear.issues` is
+  `O` (a picker when several), whether they point to Linear issues, Slack messages or anything else. Example: `linear.issues` is
   `{"label": "Linear issues", "links": [{"id": "ACME-1", "title": "Fix login", "url": "https://linear.app/acme/issue/ACME-1/fix-login", "detail": "In Progress"}]}`.
   Neither convention scores by itself; a PR-level `score` or `attention` field in the value does.
+
+Plugins are separate binaries that talk to the daemon only through these subjects: `dev-inbox-jev`
+(comment intent), `dev-inbox-linear` (due dates and linked issues) and `dev-inbox-slack` (review-channel tags;
+requests unknown PRs with `pr.track`, annotates `slack.mentions`). See
+[proposals/slack.md](proposals/slack.md).
 
 Workflow ideas: [ideas.md](ideas.md).
 

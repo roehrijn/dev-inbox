@@ -19,6 +19,7 @@ func (d *daemon) serveAPI() error {
 		api.SubjectList:     d.handleList,
 		api.SubjectGet:      d.handleGet,
 		api.SubjectAnnotate: d.handleAnnotate,
+		api.SubjectTrack:    d.handleTrack,
 	} {
 		if err := d.bus.Serve(subject, fn); err != nil {
 			return fmt.Errorf("serve %s: %w", subject, err)
@@ -119,6 +120,25 @@ func withAnnotation(annotations []model.Annotation, a model.Annotation) []model.
 		out = append(out, a)
 	}
 	return out
+}
+
+// handleTrack queues a PR the store does not know yet. Ingestion emits pr.discovered as for any new PR.
+func (d *daemon) handleTrack(ctx context.Context, req []byte) (any, error) {
+	var r api.TrackRequest
+	if err := json.Unmarshal(req, &r); err != nil {
+		return nil, fmt.Errorf("decode request: %w", err)
+	}
+	if r.PR.Owner == "" || r.PR.Repo == "" || r.PR.Number <= 0 {
+		return nil, fmt.Errorf("invalid PR %s", r.PR)
+	}
+	_, known, err := d.store.GetPR(ctx, r.PR)
+	if err != nil {
+		return nil, err
+	}
+	if !known {
+		d.queue.push(item{key: r.PR})
+	}
+	return api.TrackResponse{Known: known}, nil
 }
 
 func (d *daemon) knownPR(ctx context.Context, key model.PRKey) (model.PR, error) {

@@ -23,6 +23,7 @@
             "cmd/dev-inbox"
             "cmd/dev-inbox-jev"
             "cmd/dev-inbox-linear"
+            "cmd/dev-inbox-slack"
           ];
           vendorHash = "sha256-wRgpU3YxqPnU319C1Zown338QtQ2ocnjx83GuO+ONKs=";
           env.CGO_ENABLED = "0";

@@ -2872,6 +2872,40 @@ func TestHidden(t *testing.T) {
 	}
 }
 
+func TestHiddenAttentionUnhides(t *testing.T) {
+	// The PR was fetched at(1) and hidden at(5).
+	hide := HiddenAnnotation(basePR(), model.Classification{})
+	hide.UpdatedAt = at(5)
+	ann := func(commentID, key, value string, minutes int) model.Annotation {
+		return model.Annotation{PR: basePR().Key, CommentID: commentID, Key: key, Value: json.RawMessage(value), UpdatedAt: at(minutes)}
+	}
+	const attn = `{"attention":["tagged in #eng"]}`
+	tests := []struct {
+		name string
+		a    model.Annotation
+		want bool // hidden
+	}{
+		{name: "attention newer than the hide", a: ann("", "slack.mentions", attn, 6)},
+		{name: "attention with score newer than the hide", a: ann("", "jev.attention", `{"score":5,"attention":["question"]}`, 6)},
+		{name: "attention older than the hide but newer than the fetch", a: ann("", "slack.mentions", attn, 4), want: true},
+		{name: "attention as old as the hide", a: ann("", "slack.mentions", attn, 5), want: true},
+		{name: "newer annotation without attention", a: ann("", "slack.mentions", `{"badge":"x"}`, 6), want: true},
+		{name: "newer annotation with empty attention", a: ann("", "slack.mentions", `{"attention":[]}`, 6), want: true},
+		{name: "newer annotation with only a score", a: ann("", "jev.attention", `{"score":50}`, 6), want: true},
+		{name: "newer annotation that is no object", a: ann("", "slack.mentions", `["tagged"]`, 6), want: true},
+		{name: "newer comment-level attention", a: ann("c", "slack.mentions", attn, 6), want: true},
+		{name: "newer urgency with attention", a: ann("", UrgencyKey, attn, 6), want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := Inputs{Viewer: viewer, Priority: Priority{Weights: DefaultWeights}, Annotations: []model.Annotation{hide, tt.a}}
+			if got := Evaluate(basePR(), in).Hidden; got != tt.want {
+				t.Fatalf("Hidden = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTeamBoost(t *testing.T) {
 	teams := []TeamBoost{
 		{Team: "acme-co/eng", Points: 10, Members: []string{"alice", "bob", "carol"}},

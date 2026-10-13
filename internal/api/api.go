@@ -21,6 +21,7 @@ const (
 	SubjectList     = "devinbox.api.inbox.list"
 	SubjectGet      = "devinbox.api.pr.get"
 	SubjectAnnotate = "devinbox.api.annotate"
+	SubjectTrack    = "devinbox.api.pr.track"
 
 	// CloudEventTypePrefix prefixes model event types, e.g. "devinbox.pr.merged".
 	CloudEventTypePrefix = "devinbox."
@@ -97,5 +98,17 @@ type AnnotateRequest struct {
 }
 
 type AnnotateResponse struct {
+	Error string `json:"error,omitempty"`
+}
+
+// TrackRequest asks the daemon to ingest a PR it does not know yet. The daemon queues it and answers at
+// once; ingestion emits pr.discovered. A PR the GitHub token cannot read is dropped by the daemon.
+type TrackRequest struct {
+	PR model.PRKey `json:"pr"`
+}
+
+// TrackResponse reports Known if the PR was already in the store, in which case nothing was queued.
+type TrackResponse struct {
+	Known bool   `json:"known,omitempty"`
 	Error string `json:"error,omitempty"`
 }

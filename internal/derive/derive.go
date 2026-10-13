@@ -459,7 +459,10 @@ func HiddenAnnotation(pr model.PR, cls model.Classification) model.Annotation {
 // hidden reports whether the viewer hid pr and nothing new happened since: the head is unchanged (no
 // commits, rebase or force-push), it was not marked ready for review, review was not newly requested
 // from the viewer personally (direct), and nobody else commented or reviewed after the snapshot the
-// viewer saw. Comments and reviews of bots and greylisted logins are not new.
+// viewer saw. Comments and reviews of bots and greylisted logins are not new. A PR-level annotation
+// with a non-empty AnnotationAttention list that was updated after the hide annotation is new too. It
+// is compared with the hide annotation's UpdatedAt, the time of hiding, rather than HiddenMark.Seen,
+// which an annotation written between the fetch and the hiding would beat.
 func hidden(pr model.PR, direct bool, in Inputs) bool {
 	i := slices.IndexFunc(in.Annotations, func(a model.Annotation) bool {
 		return a.CommentID == "" && a.Key == HiddenKey
@@ -467,9 +470,19 @@ func hidden(pr model.PR, direct bool, in Inputs) bool {
 	if i < 0 {
 		return false
 	}
+	hiddenAt := in.Annotations[i].UpdatedAt
 	var m HiddenMark
 	if json.Unmarshal(in.Annotations[i].Value, &m) != nil || m.Head != pr.HeadSHA ||
 		m.Draft && !pr.IsDraft || direct && !m.Requested {
+		return false
+	}
+	if slices.ContainsFunc(in.Annotations, func(a model.Annotation) bool {
+		if a.CommentID != "" || a.Key == UrgencyKey || a.Key == HiddenKey || !a.UpdatedAt.After(hiddenAt) {
+			return false
+		}
+		var list []string
+		return json.Unmarshal(annotationFields(a)[AnnotationAttention], &list) == nil && len(list) > 0
+	}) {
 		return false
 	}
 	news := func(login string, at time.Time) bool {

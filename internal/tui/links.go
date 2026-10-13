@@ -17,7 +17,7 @@ import (
 
 const (
 	defaultLinksLabel = "Links"
-	pickerTitle       = "Open linked issue"
+	pickerTitle       = "Open link"
 	maxPickerWidth    = 80
 )
 
@@ -137,7 +137,7 @@ func (a *app) openLinks(it api.InboxItem) tea.Cmd {
 	links := prLinks(it.Annotations)
 	switch len(links) {
 	case 0:
-		return a.setFlash("no linked issues", false)
+		return a.setFlash("no links", false)
 	case 1:
 		return a.openCmd(links[0].URL)
 	}

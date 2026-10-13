@@ -5,6 +5,10 @@ credentials, tracks the PRs that involve you, and publishes every change as a Cl
 NATS server with JetStream. The TUI is a plain NATS client of that daemon; any other tool can subscribe
 to the same events or call the same API. GitHub state is never modified.
 
+Optional plugins add signals from other tools through the same API: the [Jev plugin](#jev-plugin) reads what
+comments want from you, the [Linear plugin](#linear-plugin) flags PRs whose issues are due soon, and the
+[Slack plugin](#slack-plugin) picks up PRs that someone tagged you on in a review channel.
+
 ## Requirements
 
 - The [`gh` CLI](https://cli.github.com), logged in to github.com (`gh auth login`). Only github.com and a
@@ -14,15 +18,15 @@ to the same events or call the same API. GitHub state is never modified.
 ## Install
 
 ```sh
-nix build                  # ./result/bin/dev-inbox, dev-inbox-jev and dev-inbox-linear
+nix build                  # ./result/bin/dev-inbox, dev-inbox-jev, dev-inbox-linear and dev-inbox-slack
 nix run . -- serve         # run without installing
 go install ./cmd/...       # to $(go env GOBIN)
-just build                 # ./bin/dev-inbox, dev-inbox-jev and dev-inbox-linear
+just build                 # ./bin/dev-inbox, dev-inbox-jev, dev-inbox-linear and dev-inbox-slack
 ```
 
 `nix build` sees only files tracked by git; use `nix build 'path:.'` to include uncommitted changes. The
-binaries are static (no cgo; SQLite is pure Go). `dev-inbox-jev` and `dev-inbox-linear` are the optional
-[Jev plugin](#jev-plugin) and [Linear plugin](#linear-plugin).
+binaries are static (no cgo; SQLite is pure Go). `dev-inbox-jev`, `dev-inbox-linear` and `dev-inbox-slack` are the
+optional [Jev plugin](#jev-plugin), [Linear plugin](#linear-plugin) and [Slack plugin](#slack-plugin).
 
 ## Quick start
 
@@ -63,11 +67,13 @@ binaries are static (no cgo; SQLite is pure Go). `dev-inbox-jev` and `dev-inbox-
    dev-inbox
    ```
 
-5. Optionally start the Jev and Linear plugins next to the daemon:
+5. Optionally start the Jev, Linear and Slack plugins next to the daemon (the Slack plugin needs a one-time
+   `dev-inbox-slack login` first, see [Slack plugin](#slack-plugin)):
 
    ```sh
    TYPESAFE_API_KEY=... dev-inbox-jev
    LINEAR_API_KEY=... dev-inbox-linear
+   dev-inbox-slack
    ```
 
 The daemon, the TUI and the plugin find each other on `nats://127.0.0.1:14222`; start them in any order. The TUI and
@@ -75,7 +81,7 @@ the plugin reconnect when the daemon restarts.
 
 ### Running as a service
 
-The daemon and the plugin are long-running and log to stderr, so a systemd user service fits them. For example
+The daemon and the plugins are long-running and log to stderr, so a systemd user service fits them. For example
 `~/.config/systemd/user/dev-inbox.service`:
 
 ```ini
@@ -132,9 +138,27 @@ RestartSec=10
 WantedBy=default.target
 ```
 
+and `~/.config/systemd/user/dev-inbox-slack.service`, which needs no environment file because it reads its token and
+settings from its own files (run `dev-inbox-slack login` once first, see [Slack plugin](#slack-plugin)):
+
+```ini
+[Unit]
+Description=dev-inbox Slack plugin
+After=dev-inbox.service
+Wants=dev-inbox.service
+
+[Service]
+ExecStart=%h/go/bin/dev-inbox-slack
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
 ```sh
 systemctl --user daemon-reload
-systemctl --user enable --now dev-inbox dev-inbox-jev dev-inbox-linear
+systemctl --user enable --now dev-inbox dev-inbox-jev dev-inbox-linear dev-inbox-slack
 journalctl --user -u dev-inbox -f
 ```
 
@@ -263,8 +287,8 @@ one, and no direct request to you applies: it is not a draft, was updated within
 checks and no merge conflict, and its author is neither a bot nor greylisted. Any review by someone who is not a bot,
 not greylisted and not the author ends the wait. Pending checks are fine.
 
-The plugins do not read this file; each has its own, see [Jev plugin](#jev-plugin) and
-[Linear plugin](#linear-plugin).
+The plugins do not read this file; each has its own (`jev.yaml`, `linear.yaml` and `slack.yaml` in the same
+directory), see [Jev plugin](#jev-plugin), [Linear plugin](#linear-plugin) and [Slack plugin](#slack-plugin).
 
 ## TUI keys
 
@@ -273,7 +297,7 @@ The plugins do not read this file; each has its own, see [Jev plugin](#jev-plugi
 | `j` / `k`, arrows | Move down / up |
 | `g` / `G` | Jump to top / bottom |
 | `o` | Open the PR in the browser (expands a collapsed section header) |
-| `O` | Open linked issue (picker when several) |
+| `O` | Open a link, such as a Linear issue or a Slack message (picker when several) |
 | `y` | Copy the PR URL |
 | `x` | Hide the PR until something new happens in it, or unhide it |
 | `tab` / `shift+tab` | Next / previous tab (wraps around) |
@@ -294,7 +318,9 @@ score. A PR that needs you is listed in both views, and the section headers coun
 `x` moves a PR into the collapsed "Hidden until new activity" section at the end of its tab, in either view. It
 comes back by itself on new commits (including a rebase or force-push), a comment or review by someone else (bots
 and greylisted logins excluded) that you have not seen, when it is marked ready for review, or when your review is
-newly requested. Checks, merge conflicts, labels and your own activity do not bring it back. The hidden state is
+newly requested. A plugin annotation with attention reasons that is newer than the hiding also brings it back, for
+example a new Jev question or a new Slack tag. Plugins write an annotation only when it changes, so an unchanged one
+does not undo a hide. Checks, merge conflicts, labels and your own activity do not bring it back. The hidden state is
 a local annotation; GitHub is not touched. The section is only shown while it holds PRs.
 
 The detail pane (`d`) lists how the score adds up, one line per term, e.g. `team acme-co/web-platform-core +30`.
@@ -302,7 +328,8 @@ The detail pane (`d`) lists how the score adds up, one line per term, e.g. `team
 Row symbols before the title: `★` review requested from you personally, `✓` / `✗` / `●` checks passed / failing /
 running, `◌` draft.
 
-The status bar lists every NATS micro service that answers a `$SRV.PING`, such as a plugin, e.g. `devinbox-jev ●` or `devinbox-linear ●`.
+The status bar lists every NATS micro service that answers a `$SRV.PING`, such as a plugin, e.g. `devinbox-jev ●`,
+`devinbox-linear ●` or `devinbox-slack ●`.
 
 ## Event stream
 
@@ -357,15 +384,22 @@ Request/reply with JSON bodies. Failures reply with `{"error": "..."}`.
 | `devinbox.api.inbox.list` | `{}` | Viewer and all open tracked PRs with their section and PR-level annotations |
 | `devinbox.api.pr.get` | `{"pr": {"owner": "...", "repo": "...", "number": 1}}` | One PR with comments and all annotations |
 | `devinbox.api.annotate` | `{"annotation": {"pr": {...}, "key": "ns.key", "value": ...}}` | Empty on success; a `null` value deletes the annotation |
+| `devinbox.api.pr.track` | `{"pr": {"owner": "...", "repo": "...", "number": 1}}` | `{}` once queued; `{"known": true}` if the PR is already stored and nothing was queued |
 
 ```sh
 nats --server nats://127.0.0.1:14222 request devinbox.api.inbox.list '{}'
 ```
 
+`devinbox.api.pr.track` asks the daemon to start tracking a PR it does not know yet, which annotations alone cannot
+do. It replies at once and fetches the PR in the background, so `devinbox.api.pr.get` finds it a moment later.
+Ingestion then emits `pr.discovered` like for any PR, so the other plugins pick it up too. A PR the GitHub token
+cannot read is logged and dropped. Any client can use it, not only the Slack plugin.
+
 Annotation values shaped like `{"badge": "due in 2d", "level": "warn"}` render as a badge in the TUI.
 
 A PR-level annotation whose JSON object value has a `links` array renders as a section in the detail pane, and its
-links open with `O` (a popup lets you choose when several are linked). Each link is
+links open with `O` (a popup lets you choose when several are linked), whatever they point to, for example Linear
+issues or Slack messages. Each link is
 `{"id", "title", "url", "detail"}`, and the optional `label` (default `Links`) is the section heading:
 
 ```json
@@ -499,10 +533,96 @@ Only the PR URL, title and branch name are sent to Linear, and the plugin only r
 registers the NATS micro service `devinbox-linear`, which the TUI status bar shows while it runs. Its durable
 JetStream consumer `linear` catches up on missed events after a restart.
 
+## Slack plugin
+
+`dev-inbox-slack` is an optional plugin that notices when someone tags you under a PR link in a Slack review
+channel. It runs next to `dev-inbox serve` and uses only the NATS API above:
+
+```sh
+go install ./cmd/dev-inbox-slack
+dev-inbox-slack login   # once
+dev-inbox-slack
+```
+
+Every `poll-interval` it reads the messages of the last `lookback` in the configured `channels`, including thread
+replies. A message tags you if it mentions you directly or one of the configured user groups (`groups`); `@here`,
+`@channel`, your own messages and bot messages do not count. The PRs come from the GitHub links in the message
+(`https://github.com/<owner>/<repo>/pull/<n>`). A tagging thread reply without a link, such as "@alice can you take
+this one?", takes the links of its thread's first message.
+
+- A PR the daemon does not know yet is requested with `devinbox.api.pr.track`, so it enters the inbox even if
+  GitHub never notified you. It gets its annotation on a later poll, once the daemon has fetched it. A PR that is
+  not accessible with your GitHub token is retried hourly.
+- A known PR gets the PR annotation `slack.mentions`, for example:
+
+  ```json
+  {"score": 10, "attention": ["tagged you in #dev-pr-reviews"], "label": "Slack",
+   "links": [{"id": "@alice", "title": "can someone from @reviewers take this?",
+              "url": "https://acme-co.slack.com/archives/C0123/p1760000000000100",
+              "detail": "#dev-pr-reviews · Oct 12 19:02"}]}
+  ```
+
+  The score is `score` (default 10) once per PR, however many messages tag you. The attention reason is `tagged you
+  in #<channel>` for a direct tag and `tagged your team in #<channel>` for a group. It makes the PR need you, so it
+  shows in the default "needs me" view and also gets the core's `needs-me` weight: a tagged PR gains 30 points in
+  total. A PR hidden with `x` comes back on a new tag.
+- The links point to the Slack messages. The details pane lists them and `O` opens them.
+- The annotation settles once you act on the PR, as with the other plugins: only tags newer than your last activity
+  count. Messages older than `lookback` drop out. The annotation is deleted when no tag is left. Tags on your own PRs
+  add nothing, since plugin scores count only on PRs of others.
+
+Apart from its token, the plugin persists nothing: it recomputes everything from the window on each poll and caches
+only thread replies in memory. It polls rather than using
+Socket Mode so that it catches up after your laptop was offline and picks up edited and deleted messages.
+
+### Sign in
+
+The plugin needs no new Slack app. `dev-inbox-slack login` runs the OAuth user flow of an existing Slack app that
+you identify by its client ID: PKCE, no client secret, redirect `http://localhost:3118/callback`. It prints the sign-in URL
+and tries to open it in the browser. You approve there, the plugin waits for the redirect on that port, and the
+token is stored in `$XDG_STATE_HOME/dev-inbox/slack-token.json` (default `~/.local/state/dev-inbox/slack-token.json`,
+mode 0600). Tokens are short-lived and rotate; the plugin refreshes
+them automatically and never logs them. If a refresh fails, polls fail with a hint to run `dev-inbox-slack login`
+again.
+
+The client ID is private: put it in `oauth-client-id` in `slack.yaml` or in `SLACK_CLIENT_ID` (which wins), and never
+commit it. The plugin has no default. The flow requests the user scopes `channels:history`, `groups:history`,
+`channels:read`, `groups:read` and `users:read`.
+
+The app does not offer `usergroups:read`, so the plugin cannot list your groups. List the IDs of the groups whose
+tags count in `groups`. They start with `S` and show in the raw text of a message that tags the group, where a group
+tag looks like `<!subteam^S0123ABCD>`.
+
+### Configuration
+
+Flags: `--config`, `--nats-url`, `--log-level`. The plugin reads its settings from its own file,
+`$XDG_CONFIG_HOME/dev-inbox/slack.yaml` (default `~/.config/dev-inbox/slack.yaml`), or from the path given with
+`--config`. It never reads the core's `config.yaml`. The settings are top-level keys, and unknown keys are errors:
+
+```yaml
+nats-url: nats://127.0.0.1:14222  # NATS URL of the daemon
+log-level: info
+oauth-client-id: "..."            # private; SLACK_CLIENT_ID wins
+channels: [dev-pr-reviews]        # channel names or IDs to read
+groups: [S0123ABCD]               # IDs of user groups whose tags count
+score: 10                         # points per tagged PR
+poll-interval: 1m
+lookback: 168h                    # how far back messages count
+```
+
+A flag given on the command line wins over the file. `nats-url` falls back to `nats://127.0.0.1:14222`; if the
+daemon listens elsewhere, set it here or with `--nats-url`. The plugin registers the NATS micro service
+`devinbox-slack`, which the TUI status bar shows while it runs.
+
+Only requests to Slack leave your machine. Excerpts of the tagging messages (the link titles) and the author's
+display name are stored in the local database, like PR content is. If Slack is down or rate limited, a poll fails,
+is logged, and the next one retries, honoring `Retry-After`. If the daemon is down, the poll skips its updates and
+the next one catches up.
+
 ## Development
 
 ```sh
-just build   # bin/dev-inbox, bin/dev-inbox-jev and bin/dev-inbox-linear
+just build   # bin/dev-inbox, bin/dev-inbox-jev, bin/dev-inbox-linear and bin/dev-inbox-slack
 just test
 just lint
 just fmt

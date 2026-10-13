@@ -195,7 +195,7 @@ func TestOpenLinkKey(t *testing.T) {
 				if len(*opened) != 0 || a.picker != nil {
 					t.Errorf("opened %v, picker %v; want nothing", *opened, a.picker)
 				}
-				assertContains(t, statusLine(a), "no linked issues")
+				assertContains(t, statusLine(a), "no links")
 				if a.flashErr {
 					t.Error("no links flashed as an error")
 				}
@@ -400,5 +400,5 @@ func TestOpenLinkKeyBinding(t *testing.T) {
 
 	a, _ := loadedApp(t, fixtureList(), 140, 40)
 	press(t, a, "?")
-	assertContains(t, screen(a), "open linked issue")
+	assertContains(t, screen(a), "open link")
 }

@@ -29,7 +29,7 @@ func newKeyMap() keyMap {
 		Collapse:   b([]string{"h", "left"}, "h", "collapse"),
 		Expand:     b([]string{"l", "right"}, "l", "expand"),
 		Open:       b([]string{"o"}, "o", "open in browser"),
-		OpenLink:   b([]string{"O"}, "O", "open linked issue"),
+		OpenLink:   b([]string{"O"}, "O", "open link"),
 		Copy:       b([]string{"y"}, "y", "copy URL"),
 		Hide:       b([]string{"x"}, "x", "hide until new"),
 		Detail:     b([]string{"d"}, "d", "details"),

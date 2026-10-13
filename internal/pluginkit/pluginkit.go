@@ -119,6 +119,18 @@ func (c *Client) Annotate(ctx context.Context, a model.Annotation) error {
 	return nil
 }
 
+// Track asks the daemon to ingest key and reports whether it already knew the PR.
+func (c *Client) Track(ctx context.Context, key model.PRKey) (known bool, err error) {
+	var resp api.TrackResponse
+	if err := c.Request(ctx, api.SubjectTrack, api.TrackRequest{PR: key}, &resp); err != nil {
+		return false, err
+	}
+	if resp.Error != "" {
+		return false, fmt.Errorf("track %s: %s", key, resp.Error)
+	}
+	return resp.Known, nil
+}
+
 func (c *Client) Request(ctx context.Context, subject string, req, resp any) error {
 	// While reconnecting, NATS buffers requests until they time out; fail fast instead.
 	if !c.nc.IsConnected() {

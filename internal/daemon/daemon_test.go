@@ -706,6 +706,47 @@ func TestAPI(t *testing.T) {
 	}
 }
 
+func TestTrack(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	known, unknown := openPR(1, "other"), openPR(2, "other")
+	seed(t, dir, true, known)
+	gh := newFake(known, unknown)
+	r := startDaemon(t, testConfig(dir), gh)
+
+	invalid := []struct {
+		name string
+		key  model.PRKey
+	}{
+		{name: "no owner", key: model.PRKey{Repo: "frontend", Number: 1}},
+		{name: "no repo", key: model.PRKey{Owner: "acme-co", Number: 1}},
+		{name: "zero number", key: model.PRKey{Owner: "acme-co", Repo: "frontend"}},
+		{name: "negative number", key: model.PRKey{Owner: "acme-co", Repo: "frontend", Number: -1}},
+	}
+	for _, tt := range invalid {
+		if resp := request[api.TrackResponse](t, r.nc, api.SubjectTrack, api.TrackRequest{PR: tt.key}); resp.Error == "" || resp.Known {
+			t.Errorf("track with %s = %+v, want an error", tt.name, resp)
+		}
+	}
+
+	if resp := request[api.TrackResponse](t, r.nc, api.SubjectTrack, api.TrackRequest{PR: known.Key}); resp.Error != "" || !resp.Known {
+		t.Fatalf("track known PR = %+v, want known", resp)
+	}
+	if resp := request[api.TrackResponse](t, r.nc, api.SubjectTrack, api.TrackRequest{PR: unknown.Key}); resp.Error != "" || resp.Known {
+		t.Fatalf("track unknown PR = %+v, want queued", resp)
+	}
+	eventually(t, "tracked PR stored", func() bool { _, ok := r.storedPR(t, unknown.Key); return ok })
+	// The queue is FIFO with a single worker, so a queued known PR would have been fetched first.
+	if n := gh.fetches(known.Key); n != 0 {
+		t.Errorf("FetchPR(known) calls = %d, want 0", n)
+	}
+
+	evs := r.settledEvents(t, 1)
+	if len(evs) != 1 || evs[0].subject != "devinbox.events.pr.acme-co.frontend.2.discovered" {
+		t.Errorf("events = %q, want only pr.discovered of the tracked PR", eventTypes(evs))
+	}
+}
+
 func TestRestartKeepsStateAndSkipsBackfill(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
