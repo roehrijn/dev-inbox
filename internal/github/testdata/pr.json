@@ -21,6 +21,7 @@
                   "contexts": {
                     "checkRunCountsByState": [
                       { "state": "FAILURE", "count": 1 },
+                      { "state": "CANCELLED", "count": 1 },
                       { "state": "IN_PROGRESS", "count": 1 },
                       { "state": "QUEUED", "count": 2 },
                       { "state": "SUCCESS", "count": 3 },
@@ -31,6 +32,13 @@
                       { "state": "ERROR", "count": 1 },
                       { "state": "PENDING", "count": 1 },
                       { "state": "SUCCESS", "count": 1 }
+                    ],
+                    "nodes": [
+                      { "__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": "https://ci/build" },
+                      { "__typename": "CheckRun", "databaseId": 2, "name": "lint", "status": "IN_PROGRESS", "conclusion": null, "detailsUrl": "https://ci/lint" },
+                      { "__typename": "CheckRun", "databaseId": 1, "name": "lint", "status": "COMPLETED", "conclusion": "CANCELLED", "detailsUrl": "https://ci/lint-old" },
+                      { "__typename": "StatusContext", "context": "ci/jenkins", "state": "ERROR", "targetUrl": "https://jenkins/1" },
+                      { "__typename": "StatusContext", "context": "deploy", "state": "PENDING", "targetUrl": null }
                     ]
                   }
                 }
@@ -54,17 +62,7 @@
           "nodes": [
             {
               "commit": {
-                "committedDate": "2026-10-09T07:00:00Z",
-                "statusCheckRollup": {
-                  "contexts": {
-                    "nodes": [
-                      { "__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": "https://ci/build" },
-                      { "__typename": "CheckRun", "name": "lint", "status": "IN_PROGRESS", "conclusion": null, "detailsUrl": "https://ci/lint" },
-                      { "__typename": "StatusContext", "context": "ci/jenkins", "state": "ERROR", "targetUrl": "https://jenkins/1" },
-                      { "__typename": "StatusContext", "context": "deploy", "state": "PENDING", "targetUrl": null }
-                    ]
-                  }
-                }
+                "committedDate": "2026-10-09T07:00:00Z"
               }
             }
           ]

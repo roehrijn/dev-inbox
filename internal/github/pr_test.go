@@ -284,7 +284,7 @@ func TestRollupCounts(t *testing.T) {
 		case failing:
 			wantFailing = 3
 		}
-		if gotRunning, gotFailing := r.counts(); gotRunning != wantRunning || gotFailing != wantFailing {
+		if gotRunning, gotFailing, _ := r.counts(); gotRunning != wantRunning || gotFailing != wantFailing {
 			t.Errorf("%s %s: running=%d failing=%d, want %d and %d", kind, state, gotRunning, gotFailing, wantRunning, wantFailing)
 		}
 	}
@@ -319,6 +319,41 @@ func TestStatusChecksFromJSON(t *testing.T) {
 				"checkRunCountsByState": [{"state": "FAILURE", "count": 2}, {"state": "IN_PROGRESS", "count": 1}, {"state": "SUCCESS", "count": 9}],
 				"statusContextCountsByState": [{"state": "ERROR", "count": 1}, {"state": "EXPECTED", "count": 2}, {"state": "SUCCESS", "count": 4}]}}}}]`,
 			want: model.PRStatus{Checks: model.ChecksFailure, ChecksRunning: 3, ChecksFailing: 3},
+		},
+		{
+			name: "rerun supersedes a cancelled run",
+			rollupNodes: `[{"commit": {"statusCheckRollup": {"state": "FAILURE", "contexts": {
+				"checkRunCountsByState": [{"state": "CANCELLED", "count": 1}, {"state": "SUCCESS", "count": 3}],
+				"statusContextCountsByState": [],
+				"nodes": [
+					{"__typename": "CheckRun", "databaseId": 2, "name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS", "checkSuite": {"workflowRun": {"workflow": {"name": "Commitlint"}}}},
+					{"__typename": "CheckRun", "databaseId": 1, "name": "lint", "status": "COMPLETED", "conclusion": "CANCELLED", "checkSuite": {"workflowRun": {"workflow": {"name": "Commitlint"}}}},
+					{"__typename": "CheckRun", "databaseId": 3, "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS", "checkSuite": {"workflowRun": {"workflow": {"name": "CI"}}}},
+					{"__typename": "CheckRun", "databaseId": 4, "name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS", "checkSuite": {"workflowRun": null}}
+				]}}}}]`,
+			want: model.PRStatus{Checks: model.ChecksSuccess},
+		},
+		{
+			name: "rerun still running supersedes a failed run",
+			rollupNodes: `[{"commit": {"statusCheckRollup": {"state": "FAILURE", "contexts": {
+				"checkRunCountsByState": [{"state": "FAILURE", "count": 1}, {"state": "IN_PROGRESS", "count": 1}],
+				"statusContextCountsByState": [],
+				"nodes": [
+					{"__typename": "CheckRun", "databaseId": 1, "name": "e2e", "status": "COMPLETED", "conclusion": "FAILURE"},
+					{"__typename": "CheckRun", "databaseId": 2, "name": "e2e", "status": "IN_PROGRESS", "conclusion": null}
+				]}}}}]`,
+			want: model.PRStatus{Checks: model.ChecksPending, ChecksRunning: 1},
+		},
+		{
+			name: "same job name in different workflows is not a rerun",
+			rollupNodes: `[{"commit": {"statusCheckRollup": {"state": "FAILURE", "contexts": {
+				"checkRunCountsByState": [{"state": "FAILURE", "count": 1}, {"state": "SUCCESS", "count": 1}],
+				"statusContextCountsByState": [],
+				"nodes": [
+					{"__typename": "CheckRun", "databaseId": 1, "name": "lint", "status": "COMPLETED", "conclusion": "FAILURE", "checkSuite": {"workflowRun": {"workflow": {"name": "Go"}}}},
+					{"__typename": "CheckRun", "databaseId": 2, "name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS", "checkSuite": {"workflowRun": {"workflow": {"name": "Docs"}}}}
+				]}}}}]`,
+			want: model.PRStatus{Checks: model.ChecksFailure, ChecksFailing: 1},
 		},
 	}
 	for _, tt := range tests {

@@ -108,7 +108,10 @@ events still carry them.
 | The PR is a draft | `draft` | -5 |
 
 Check counts come from the rollup's per-state counts, so they are not capped like the listed check
-runs, and they are part of `PRStatus`: reconciliation refetches a PR when they change.
+runs, and they are part of `PRStatus`: reconciliation refetches a PR when they change. GitHub's
+rollup also counts check runs that a rerun of the same workflow job superseded, such as a run
+cancelled by its successor; those are found among the first 100 listed check runs and subtracted,
+and the check state is then derived from the corrected counts, matching `gh pr checks`.
 
 Members of the preferred teams are fetched at startup and every 6 hours, and cached in the store for
 offline starts. A team that is not found or not accessible contributes nothing; other fetch failures keep

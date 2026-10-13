@@ -1,6 +1,7 @@
 package github
 
 import (
+	"cmp"
 	"slices"
 	"strings"
 	"time"
@@ -22,7 +23,15 @@ const statusFragment = `fragment Status on PullRequest {
       commit {
         statusCheckRollup {
           state
-          contexts { checkRunCountsByState { state count } statusContextCountsByState { state count } }
+          contexts(first: 100) {
+            checkRunCountsByState { state count }
+            statusContextCountsByState { state count }
+            nodes {
+              __typename
+              ... on CheckRun { databaseId name status conclusion detailsUrl checkSuite { workflowRun { workflow { name } } } }
+              ... on StatusContext { context state targetUrl }
+            }
+          }
         }
       }
     }
@@ -50,18 +59,7 @@ const prQuery = `query PullRequest($owner: String!, $repo: String!, $number: Int
       createdAt
       headCommit: commits(last: 1) {
         nodes {
-          commit {
-            committedDate
-            statusCheckRollup {
-              contexts(first: 100) {
-                nodes {
-                  __typename
-                  ... on CheckRun { name status conclusion detailsUrl }
-                  ... on StatusContext { context state targetUrl }
-                }
-              }
-            }
-          }
+          commit { committedDate }
         }
       }
       reviewRequests(first: 100) {
@@ -180,12 +178,13 @@ type gqlStatus struct {
 }
 
 // gqlRollup is the status check rollup of a commit. Its counts cover every check, unlike the
-// capped contexts nodes of the full PR query.
+// capped contexts nodes.
 type gqlRollup struct {
 	State    string `json:"state"`
 	Contexts struct {
-		CheckRunCountsByState      []gqlStateCount `json:"checkRunCountsByState"`
-		StatusContextCountsByState []gqlStateCount `json:"statusContextCountsByState"`
+		CheckRunCountsByState      []gqlStateCount   `json:"checkRunCountsByState"`
+		StatusContextCountsByState []gqlStateCount   `json:"statusContextCountsByState"`
+		Nodes                      []gqlCheckContext `json:"nodes"`
 	} `json:"contexts"`
 }
 
@@ -194,26 +193,62 @@ type gqlStateCount struct {
 	Count int    `json:"count"`
 }
 
-// counts buckets the checks by state. States not listed, including ones GitHub adds later, are
-// neither running nor failing.
-func (r gqlRollup) counts() (running, failing int) {
-	for _, c := range r.Contexts.CheckRunCountsByState {
-		switch c.State {
-		case "QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED":
-			running += c.Count
-		case "FAILURE", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED":
-			failing += c.Count
+// checkRunBucket classifies a check run state. States not listed, including ones GitHub adds
+// later, are neither running nor failing.
+func checkRunBucket(state string) (running, failing bool) {
+	switch state {
+	case "QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED":
+		return true, false
+	case "FAILURE", "TIMED_OUT", "CANCELLED", "STARTUP_FAILURE", "ACTION_REQUIRED":
+		return false, true
+	}
+	return false, false
+}
+
+// counts buckets the checks by state, leaving out superseded check runs, and reports whether there
+// were any.
+func (r gqlRollup) counts() (running, failing int, dropped bool) {
+	add := func(isRunning, isFailing bool, n int) {
+		if isRunning {
+			running += n
 		}
+		if isFailing {
+			failing += n
+		}
+	}
+	for _, c := range r.Contexts.CheckRunCountsByState {
+		isRunning, isFailing := checkRunBucket(c.State)
+		add(isRunning, isFailing, c.Count)
 	}
 	for _, c := range r.Contexts.StatusContextCountsByState {
-		switch c.State {
-		case "PENDING", "EXPECTED":
-			running += c.Count
-		case "FAILURE", "ERROR":
-			failing += c.Count
+		add(c.State == "PENDING" || c.State == "EXPECTED", c.State == "FAILURE" || c.State == "ERROR", c.Count)
+	}
+	_, old := latestContexts(r.Contexts.Nodes)
+	for _, cc := range old {
+		isRunning, isFailing := checkRunBucket(cmp.Or(cc.Conclusion, cc.Status))
+		add(isRunning, isFailing, -1)
+	}
+	return running, failing, len(old) > 0
+}
+
+// latestContexts splits check contexts into the ones GitHub shows and the check runs a newer run of
+// the same check (by workflow and name) superseded, such as a run cancelled by its successor. The
+// rollup state and counts still include superseded runs.
+func latestContexts(nodes []gqlCheckContext) (latest, superseded []gqlCheckContext) {
+	newest := map[string]int64{}
+	for _, cc := range nodes {
+		if k, ok := cc.checkKey(); ok {
+			newest[k] = max(newest[k], cc.DatabaseID)
 		}
 	}
-	return running, failing
+	for _, cc := range nodes {
+		if k, ok := cc.checkKey(); ok && cc.DatabaseID < newest[k] {
+			superseded = append(superseded, cc)
+			continue
+		}
+		latest = append(latest, cc)
+	}
+	return latest, superseded
 }
 
 func (s gqlStatus) toModel() model.PRStatus {
@@ -229,8 +264,18 @@ func (s gqlStatus) toModel() model.PRStatus {
 	}
 	if n := s.RollupCommit.Nodes; len(n) > 0 && n[0].Commit.StatusCheckRollup != nil {
 		r := n[0].Commit.StatusCheckRollup
+		var dropped bool
+		st.ChecksRunning, st.ChecksFailing, dropped = r.counts()
 		st.Checks = collapseChecks(r.State)
-		st.ChecksRunning, st.ChecksFailing = r.counts()
+		if dropped {
+			st.Checks = model.ChecksSuccess
+			switch {
+			case st.ChecksFailing > 0:
+				st.Checks = model.ChecksFailure
+			case st.ChecksRunning > 0:
+				st.Checks = model.ChecksPending
+			}
+		}
 	}
 	return st
 }
@@ -361,6 +406,26 @@ type gqlCheckContext struct {
 	Context    string `json:"context"`
 	State      string `json:"state"`
 	TargetURL  string `json:"targetUrl"`
+	DatabaseID int64  `json:"databaseId"`
+	CheckSuite *struct {
+		WorkflowRun *struct {
+			Workflow struct {
+				Name string `json:"name"`
+			} `json:"workflow"`
+		} `json:"workflowRun"`
+	} `json:"checkSuite"`
+}
+
+// checkKey identifies a check run across reruns; status contexts are already unique per context.
+func (cc gqlCheckContext) checkKey() (string, bool) {
+	if cc.Typename != "CheckRun" {
+		return "", false
+	}
+	var workflow string
+	if cc.CheckSuite != nil && cc.CheckSuite.WorkflowRun != nil {
+		workflow = cc.CheckSuite.WorkflowRun.Workflow.Name
+	}
+	return workflow + "\x00" + cc.Name, true
 }
 
 func (cc gqlCheckContext) toModel() model.CheckRun {
@@ -398,10 +463,11 @@ func (p *gqlPR) toModel(key model.PRKey, fetchedAt time.Time) model.PR {
 	}
 	if n := p.HeadCommit.Nodes; len(n) > 0 {
 		pr.LastPushAt = n[0].Commit.CommittedDate
-		if r := n[0].Commit.StatusCheckRollup; r != nil {
-			for _, cc := range r.Contexts.Nodes {
-				pr.CheckRuns = append(pr.CheckRuns, cc.toModel())
-			}
+	}
+	if n := p.RollupCommit.Nodes; len(n) > 0 && n[0].Commit.StatusCheckRollup != nil {
+		latest, _ := latestContexts(n[0].Commit.StatusCheckRollup.Contexts.Nodes)
+		for _, cc := range latest {
+			pr.CheckRuns = append(pr.CheckRuns, cc.toModel())
 		}
 	}
 	for _, n := range p.ReviewRequests.Nodes {
