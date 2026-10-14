@@ -80,7 +80,8 @@ Open PRs only; closed and merged get `SectionNone`. Logins compare case-insensit
 | `ready_to_merge` | Mine and in merge queue, or merge state `CLEAN`/`HAS_HOOKS` and (decision `APPROVED`, or decision empty with no pending review requests and at least one `APPROVED` review). |
 | `waiting_for_review` | Mine, otherwise. |
 
-New comments: comments by someone other than the viewer and not a bot (login suffix `[bot]`), created
+New comments: comments by someone other than the viewer, not a bot (login suffix `[bot]`) and not a
+greylisted login (bot accounts that are plain users, such as `loft-bot`), created
 after the viewer's last activity = latest of `LastPushAt`, the viewer's own comments and reviews.
 
 ## Priority (derive.Score)

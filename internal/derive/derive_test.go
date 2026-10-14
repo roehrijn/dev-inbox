@@ -153,6 +153,13 @@ func TestClassify(t *testing.T) {
 			want: model.Classification{Section: model.SectionNeedsAction, Reasons: []string{"new comments"}},
 		},
 		{
+			name: "comments of greylisted logins are not new",
+			pr: minePR(func(pr *model.PR) {
+				pr.Comments = []model.Comment{{ID: "c1", Kind: model.CommentReview, Author: "loft-bot", CreatedAt: at(5)}}
+			}),
+			want: model.Classification{Section: model.SectionWaitingForReview},
+		},
+		{
 			name: "needs action lists all reasons in table order",
 			pr: minePR(func(pr *model.PR) {
 				pr.Checks = model.ChecksFailure
@@ -275,7 +282,7 @@ func TestClassify(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := Classify(tt.pr, viewer); !reflect.DeepEqual(got, tt.want) {
+			if got := Classify(tt.pr, viewer, []string{"Loft-Bot"}); !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("Classify = %+v, want %+v", got, tt.want)
 			}
 		})
@@ -376,7 +383,7 @@ func TestClassifyNewComments(t *testing.T) {
 				pr.Comments = tt.comments
 				pr.Reviews = tt.reviews
 			})
-			if got := Classify(pr, viewer).Section; got != tt.want {
+			if got := Classify(pr, viewer, nil).Section; got != tt.want {
 				t.Fatalf("section = %q, want %q", got, tt.want)
 			}
 		})
@@ -938,7 +945,7 @@ func TestDiff(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Diff: %v", err)
 			}
-			wantCls := Classify(tt.cur, viewer)
+			wantCls := Classify(tt.cur, viewer, nil)
 			wantCls.Score = tt.score
 			if tt.attention != nil {
 				wantCls.Reasons, wantCls.NeedsMe = tt.attention, true
@@ -2814,7 +2821,7 @@ func TestHidden(t *testing.T) {
 	requested := func(pr *model.PR) { pr.ReviewRequests = []model.ReviewRequest{{Login: "viewer"}} }
 	// seen is basePR's FetchedAt, at(1).
 	hide := func(pr model.PR) []model.Annotation {
-		return []model.Annotation{HiddenAnnotation(pr, Classify(pr, viewer))}
+		return []model.Annotation{HiddenAnnotation(pr, Classify(pr, viewer, nil))}
 	}
 	in := Inputs{Viewer: viewer, Priority: Priority{Greylist: []string{"acme-bot"}, Weights: DefaultWeights}}
 

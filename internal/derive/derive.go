@@ -13,7 +13,8 @@ import (
 )
 
 // Classify assigns a PR to an inbox section for viewer. Closed and merged PRs get SectionNone.
-func Classify(pr model.PR, viewer model.Viewer) model.Classification {
+// Comments of greylisted logins are not new.
+func Classify(pr model.PR, viewer model.Viewer, greylist []string) model.Classification {
 	if pr.State != model.PRStateOpen {
 		return model.Classification{}
 	}
@@ -32,7 +33,7 @@ func Classify(pr model.PR, viewer model.Viewer) model.Classification {
 	if pr.IsDraft {
 		return model.Classification{Section: model.SectionDrafts}
 	}
-	if reasons := needsActionReasons(pr, viewer); len(reasons) > 0 {
+	if reasons := needsActionReasons(pr, viewer, greylist); len(reasons) > 0 {
 		return model.Classification{Section: model.SectionNeedsAction, Reasons: reasons}
 	}
 	if readyToMerge(pr) {
@@ -41,7 +42,7 @@ func Classify(pr model.PR, viewer model.Viewer) model.Classification {
 	return model.Classification{Section: model.SectionWaitingForReview}
 }
 
-func needsActionReasons(pr model.PR, viewer model.Viewer) []string {
+func needsActionReasons(pr model.PR, viewer model.Viewer, greylist []string) []string {
 	var reasons []string
 	if pr.Checks == model.ChecksFailure {
 		reasons = append(reasons, "checks failing")
@@ -52,7 +53,7 @@ func needsActionReasons(pr model.PR, viewer model.Viewer) []string {
 	if pr.Mergeable == "CONFLICTING" {
 		reasons = append(reasons, "merge conflict")
 	}
-	if hasNewComments(pr, viewer) {
+	if hasNewComments(pr, viewer, greylist) {
 		reasons = append(reasons, "new comments")
 	}
 	return reasons
@@ -75,15 +76,16 @@ func readyToMerge(pr model.PR) bool {
 	return false
 }
 
-// hasNewComments reports whether someone other than the viewer, and not a bot, commented after the
-// viewer's last activity. A push counts as activity: it is the viewer's answer to earlier comments.
-func hasNewComments(pr model.PR, viewer model.Viewer) bool {
+// hasNewComments reports whether someone other than the viewer, a bot or a greylisted login
+// commented after the viewer's last activity. A push counts as activity: it is the viewer's answer
+// to earlier comments.
+func hasNewComments(pr model.PR, viewer model.Viewer, greylist []string) bool {
 	last := LastActivity(pr, viewer)
 	if pr.LastPushAt.After(last) {
 		last = pr.LastPushAt
 	}
 	return slices.ContainsFunc(pr.Comments, func(c model.Comment) bool {
-		return !isViewer(c.Author, viewer) && !isBot(c.Author) && c.CreatedAt.After(last)
+		return !isViewer(c.Author, viewer) && !isBot(c.Author) && !greylisted(c.Author, greylist) && c.CreatedAt.After(last)
 	})
 }
 
@@ -635,7 +637,7 @@ func trimBot(login string) string {
 // Evaluate classifies pr, sets its score with its terms and whether it is hidden. A foreign open PR also gets its
 // attention reasons, and NeedsMe if it has any; see attention.
 func Evaluate(pr model.PR, in Inputs) model.Classification {
-	cls := Classify(pr, in.Viewer)
+	cls := Classify(pr, in.Viewer, in.Priority.Greylist)
 	var extra []model.ScoreTerm
 	if cls.Section == model.SectionReviewRequested || cls.Section == model.SectionInvolved {
 		cls.Reasons, extra = attention(pr, cls.Direct, in)
@@ -658,7 +660,7 @@ func Diff(old *model.PR, cur model.PR, in Inputs) ([]model.Event, error) {
 		changes = append(changes, change{typ: model.EventDiscovered})
 		changes = appendRequests(changes, model.EventReviewRequested, viewerRequests(cur.ReviewRequests, viewer), viewer)
 	} else {
-		changes = diffChanges(*old, cur, viewer, cls.Section)
+		changes = diffChanges(*old, cur, in, cls.Section)
 		if len(changes) > 0 || prChanged(*old, cur) || reactionsChanged(*old, cur) {
 			changes = append(changes, change{typ: model.EventUpdated})
 		}
@@ -677,7 +679,8 @@ func Diff(old *model.PR, cur model.PR, in Inputs) ([]model.Event, error) {
 
 // diffChanges lists every change except pr.updated and discovery, in event order. section is the
 // classification of cur.
-func diffChanges(old, cur model.PR, viewer model.Viewer, section model.Section) []change {
+func diffChanges(old, cur model.PR, in Inputs, section model.Section) []change {
+	viewer := in.Viewer
 	var cs []change
 	if typ := stateEvent(old.State, cur.State); typ != "" {
 		cs = append(cs, change{typ: typ})
@@ -716,7 +719,7 @@ func diffChanges(old, cur model.PR, viewer model.Viewer, section model.Section) 
 		cs = append(cs, change{model.EventDraftChanged, model.ChangeDraft{IsDraft: cur.IsDraft}})
 	}
 
-	if from := Classify(old, viewer).Section; from != section {
+	if from := Classify(old, viewer, in.Priority.Greylist).Section; from != section {
 		cs = append(cs, change{model.EventSectionChanged, model.ChangeSection{From: from, To: section}})
 	}
 	return cs
