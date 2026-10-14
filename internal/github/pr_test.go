@@ -355,6 +355,30 @@ func TestStatusChecksFromJSON(t *testing.T) {
 				]}}}}]`,
 			want: model.PRStatus{Checks: model.ChecksFailure, ChecksFailing: 1},
 		},
+		{
+			name: "newer workflow run supersedes every job of the older one",
+			rollupNodes: `[{"commit": {"statusCheckRollup": {"state": "FAILURE", "contexts": {
+				"checkRunCountsByState": [{"state": "CANCELLED", "count": 2}, {"state": "SUCCESS", "count": 2}],
+				"statusContextCountsByState": [],
+				"nodes": [
+					{"__typename": "CheckRun", "databaseId": 1, "name": "build", "status": "COMPLETED", "conclusion": "CANCELLED", "checkSuite": {"workflowRun": {"databaseId": 10, "event": "pull_request", "workflow": {"name": "E2E"}}}},
+					{"__typename": "CheckRun", "databaseId": 2, "name": "suite: ${{ matrix.name }}", "status": "COMPLETED", "conclusion": "CANCELLED", "checkSuite": {"workflowRun": {"databaseId": 10, "event": "pull_request", "workflow": {"name": "E2E"}}}},
+					{"__typename": "CheckRun", "databaseId": 3, "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS", "checkSuite": {"workflowRun": {"databaseId": 11, "event": "pull_request", "workflow": {"name": "E2E"}}}},
+					{"__typename": "CheckRun", "databaseId": 4, "name": "suite: ui", "status": "COMPLETED", "conclusion": "SUCCESS", "checkSuite": {"workflowRun": {"databaseId": 11, "event": "pull_request", "workflow": {"name": "E2E"}}}}
+				]}}}}]`,
+			want: model.PRStatus{Checks: model.ChecksSuccess},
+		},
+		{
+			name: "runs of the same workflow for different events are both current",
+			rollupNodes: `[{"commit": {"statusCheckRollup": {"state": "FAILURE", "contexts": {
+				"checkRunCountsByState": [{"state": "FAILURE", "count": 1}, {"state": "SUCCESS", "count": 1}],
+				"statusContextCountsByState": [],
+				"nodes": [
+					{"__typename": "CheckRun", "databaseId": 1, "name": "test", "status": "COMPLETED", "conclusion": "FAILURE", "checkSuite": {"workflowRun": {"databaseId": 10, "event": "push", "workflow": {"name": "CI"}}}},
+					{"__typename": "CheckRun", "databaseId": 2, "name": "deploy", "status": "COMPLETED", "conclusion": "SUCCESS", "checkSuite": {"workflowRun": {"databaseId": 11, "event": "pull_request", "workflow": {"name": "CI"}}}}
+				]}}}}]`,
+			want: model.PRStatus{Checks: model.ChecksFailure, ChecksFailing: 1},
+		},
 	}
 	for _, tt := range tests {
 		var s gqlStatus

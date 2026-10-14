@@ -28,7 +28,7 @@ const statusFragment = `fragment Status on PullRequest {
             statusContextCountsByState { state count }
             nodes {
               __typename
-              ... on CheckRun { databaseId name status conclusion detailsUrl checkSuite { workflowRun { workflow { name } } } }
+              ... on CheckRun { databaseId name status conclusion detailsUrl checkSuite { workflowRun { databaseId event workflow { name } } } }
               ... on StatusContext { context state targetUrl }
             }
           }
@@ -231,18 +231,26 @@ func (r gqlRollup) counts() (running, failing int, dropped bool) {
 	return running, failing, len(old) > 0
 }
 
-// latestContexts splits check contexts into the ones GitHub shows and the check runs a newer run of
-// the same check (by workflow and name) superseded, such as a run cancelled by its successor. The
-// rollup state and counts still include superseded runs.
+// latestContexts splits check contexts into the current ones and the superseded check runs: those of
+// a workflow run that a newer run of the same workflow and event replaced, such as one cancelled by
+// its successor, and those a newer check run of the same name replaced, such as a re-run job. Whole
+// runs are compared because a run cancelled early can have jobs its successor names differently,
+// such as unexpanded matrix jobs. The rollup state and counts still include superseded check runs.
 func latestContexts(nodes []gqlCheckContext) (latest, superseded []gqlCheckContext) {
-	newest := map[string]int64{}
+	newestRun := map[string]int64{}
+	newestCheck := map[string]int64{}
 	for _, cc := range nodes {
+		if wf, run, ok := cc.workflowRun(); ok {
+			newestRun[wf] = max(newestRun[wf], run)
+		}
 		if k, ok := cc.checkKey(); ok {
-			newest[k] = max(newest[k], cc.DatabaseID)
+			newestCheck[k] = max(newestCheck[k], cc.DatabaseID)
 		}
 	}
 	for _, cc := range nodes {
-		if k, ok := cc.checkKey(); ok && cc.DatabaseID < newest[k] {
+		wf, run, isRun := cc.workflowRun()
+		k, isCheck := cc.checkKey()
+		if isRun && run < newestRun[wf] || isCheck && cc.DatabaseID < newestCheck[k] {
 			superseded = append(superseded, cc)
 			continue
 		}
@@ -409,11 +417,22 @@ type gqlCheckContext struct {
 	DatabaseID int64  `json:"databaseId"`
 	CheckSuite *struct {
 		WorkflowRun *struct {
-			Workflow struct {
+			DatabaseID int64  `json:"databaseId"`
+			Event      string `json:"event"`
+			Workflow   struct {
 				Name string `json:"name"`
 			} `json:"workflow"`
 		} `json:"workflowRun"`
 	} `json:"checkSuite"`
+}
+
+// workflowRun returns the workflow and event of an Actions check run, as a key, and its run's ID.
+func (cc gqlCheckContext) workflowRun() (workflow string, run int64, ok bool) {
+	if cc.Typename != "CheckRun" || cc.CheckSuite == nil || cc.CheckSuite.WorkflowRun == nil {
+		return "", 0, false
+	}
+	wr := cc.CheckSuite.WorkflowRun
+	return wr.Workflow.Name + "\x00" + wr.Event, wr.DatabaseID, true
 }
 
 // checkKey identifies a check run across reruns; status contexts are already unique per context.
@@ -421,10 +440,7 @@ func (cc gqlCheckContext) checkKey() (string, bool) {
 	if cc.Typename != "CheckRun" {
 		return "", false
 	}
-	var workflow string
-	if cc.CheckSuite != nil && cc.CheckSuite.WorkflowRun != nil {
-		workflow = cc.CheckSuite.WorkflowRun.Workflow.Name
-	}
+	workflow, _, _ := cc.workflowRun()
 	return workflow + "\x00" + cc.Name, true
 }
 
