@@ -15,7 +15,9 @@ import (
 )
 
 const (
-	rowHeight = 2
+	// wideRowMinWidth is the narrowest list that fits a row's meta on one line; narrower
+	// lists split it over two.
+	wideRowMinWidth = 100
 	// rowIndent is the width of the gutter, direct flag and checks icon in front of a title.
 	rowIndent = 6
 	// splitMinWidth is the narrowest terminal that shows the detail pane beside the list.
@@ -58,7 +60,7 @@ func (a *app) layout() layout {
 		l.detailW, l.detailH = a.width-l.listW, h
 		return l
 	}
-	l.listH = max(h*2/5, min(h, rowHeight+1))
+	l.listH = max(h*2/5, min(h, rowHeight(a.width)+1))
 	l.detailW, l.detailH = a.width, h-l.listH
 	return l
 }
@@ -71,11 +73,20 @@ func (l layout) detailSize() (w, h int) {
 	return max(l.detailW-1, 0), max(l.detailH-1, 0)
 }
 
+func rowHeight(w int) int {
+	if w < wideRowMinWidth {
+		return 3
+	}
+	return 2
+}
+
 type span struct{ top, bottom int }
 
-// spans returns the list lines occupied by each entry, in the order of listLines. The
-// first row of a section includes its header so scrolling up reveals the header.
-func (a *app) spans() (spans []span, total int) {
+// spans returns the lines of a list w cells wide occupied by each entry, in the order of
+// listLines. The first row of a section includes its header so scrolling up reveals the
+// header.
+func (a *app) spans(w int) (spans []span, total int) {
+	rh := rowHeight(w)
 	line := 0
 	for _, si := range a.tabSections(a.tab) {
 		s := a.sections[si]
@@ -91,8 +102,8 @@ func (a *app) spans() (spans []span, total int) {
 				if ri == 0 {
 					top = header
 				}
-				spans = append(spans, span{top, line + rowHeight - 1})
-				line += rowHeight
+				spans = append(spans, span{top, line + rh - 1})
+				line += rh
 			}
 		}
 	}
@@ -100,8 +111,9 @@ func (a *app) spans() (spans []span, total int) {
 }
 
 func (a *app) ensureVisible() {
-	h := a.layout().listH
-	spans, total := a.spans()
+	l := a.layout()
+	h := l.listH
+	spans, total := a.spans(l.listW)
 	t := a.cur()
 	if t.cursor >= 0 && t.cursor < len(spans) && h > 0 {
 		s := spans[t.cursor]
@@ -245,8 +257,7 @@ func (a *app) listLines(w int) []string {
 			continue
 		}
 		for ri, it := range s.items {
-			l1, l2 := a.renderRow(it, hasSel && sel.sec == si && sel.row == ri, w)
-			lines = append(lines, l1, l2)
+			lines = append(lines, a.renderRow(it, hasSel && sel.sec == si && sel.row == ri, w)...)
 		}
 	}
 	// Not tabCount: PRs hidden until new activity are left out of it but still listed.
@@ -289,7 +300,9 @@ func (a *app) renderSectionHeader(s section, collapsed, focused bool, w int) str
 	return line
 }
 
-func (a *app) renderRow(it api.InboxItem, selected bool, w int) (string, string) {
+// renderRow renders the rowHeight(w) lines of a row: the title, then the PR's identity and
+// state, which go on separate lines in a narrow list.
+func (a *app) renderRow(it api.InboxItem, selected bool, w int) []string {
 	pr := it.PR
 	gutter := a.gutter(selected)
 	flag := " "
@@ -323,27 +336,35 @@ func (a *app) renderRow(it api.InboxItem, selected bool, w int) (string, string)
 		line1 += strings.Repeat(" ", max(avail-ansi.StringWidth(t)-tw, 1)) + tail
 	}
 
-	meta := []string{a.st.muted.Render(pr.Key.String())}
+	ident := []string{a.st.muted.Render(pr.Key.String())}
 	if pr.Author != "" {
-		meta = append(meta, a.st.muted.Render(pr.Author))
+		ident = append(ident, a.st.muted.Render(pr.Author))
 	}
 	if age := relAge(a.now(), pr.UpdatedAt); age != "" {
-		meta = append(meta, a.st.muted.Render(age))
+		ident = append(ident, a.st.muted.Render(age))
 	}
 	if pr.IsDraft {
-		meta = append(meta, a.st.draft.Render("draft"))
+		ident = append(ident, a.st.draft.Render("draft"))
 	}
+	var state []string
 	if d := a.decision(pr.ReviewDecision, it.Reasons); d != "" {
-		meta = append(meta, d)
+		state = append(state, d)
 	}
 	if len(it.Reasons) > 0 {
-		meta = append(meta, a.st.accent.Render(strings.Join(it.Reasons, ", ")))
+		state = append(state, a.st.accent.Render(strings.Join(it.Reasons, ", ")))
 	}
 	if c := a.conflictMarker(it); c != "" {
-		meta = append(meta, c)
+		state = append(state, c)
 	}
-	line2 := gutter + strings.Repeat(" ", rowIndent-1) + strings.Join(meta, a.st.muted.Render(" · "))
-	return ansi.Truncate(line1, w, ""), ansi.Truncate(line2, w, "…")
+	meta := func(parts []string) string {
+		s := gutter + strings.Repeat(" ", rowIndent-1) + strings.Join(parts, a.st.muted.Render(" · "))
+		return ansi.Truncate(s, w, "…")
+	}
+	line1 = ansi.Truncate(line1, w, "")
+	if rowHeight(w) == 2 {
+		return []string{line1, meta(append(ident, state...))}
+	}
+	return []string{line1, meta(ident), meta(state)}
 }
 
 // renderTail renders the score and badges at the right end of a row's first line within

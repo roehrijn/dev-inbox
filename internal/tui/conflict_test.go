@@ -44,9 +44,10 @@ func TestRowConflictMarker(t *testing.T) {
 		for _, w := range []int{120, 80} {
 			t.Run(fmt.Sprintf("%s/w%d", tt.name, w), func(t *testing.T) {
 				a := newTestApp(&fakeBackend{})
-				l1, l2 := a.renderRow(tt.it, false, w)
-				if got := strings.Count(ansi.Strip(l2), mergeConflict); got != tt.want {
-					t.Errorf("width %d: %d markers on line 2, want %d: %q", w, got, tt.want, ansi.Strip(l2))
+				rows := a.renderRow(tt.it, false, w)
+				l1, meta := rows[0], ansi.Strip(strings.Join(rows[1:], "\n"))
+				if got := strings.Count(meta, mergeConflict); got != tt.want {
+					t.Errorf("width %d: %d markers below the title, want %d: %q", w, got, tt.want, meta)
 				}
 				if strings.Contains(ansi.Strip(l1), mergeConflict) {
 					t.Errorf("width %d: marker on line 1: %q", w, ansi.Strip(l1))
@@ -60,7 +61,7 @@ func TestRowConflictMarkerFollowsMetadata(t *testing.T) {
 	a := newTestApp(&fakeBackend{})
 	it := conflictItem(model.SectionReviewRequested, "CONFLICTING")
 	it.PR.IsDraft = true
-	_, l2 := a.renderRow(it, false, 120)
+	l2 := a.renderRow(it, false, 120)[1]
 	if got, want := ansi.Strip(l2), "o/r#1 · alice · 1h ago · draft · merge conflict"; !strings.HasSuffix(got, want) {
 		t.Errorf("line 2 = %q, want suffix %q", got, want)
 	}
@@ -69,7 +70,7 @@ func TestRowConflictMarkerFollowsMetadata(t *testing.T) {
 	}
 
 	it = conflictItem(model.SectionNeedsAction, "CONFLICTING", "checks failing", "merge conflict")
-	_, l2 = a.renderRow(it, false, 120)
+	l2 = a.renderRow(it, false, 120)[1]
 	if got, want := ansi.Strip(l2), "o/r#1 · alice · 1h ago · checks failing, merge conflict"; !strings.HasSuffix(got, want) {
 		t.Errorf("line 2 = %q, want suffix %q", got, want)
 	}
@@ -79,10 +80,7 @@ func TestRowConflictMarkerSurvivesNarrowWidths(t *testing.T) {
 	a := newTestApp(&fakeBackend{})
 	it := conflictItem(model.SectionInvolved, "CONFLICTING")
 	for w := 0; w <= 60; w++ {
-		l1, l2 := a.renderRow(it, true, w)
-		if ansi.StringWidth(l1) > w || ansi.StringWidth(l2) > w {
-			t.Errorf("width %d: row overflows: %q / %q", w, ansi.Strip(l1), ansi.Strip(l2))
-		}
+		assertRowFits(t, a.renderRow(it, true, w), w)
 	}
 }
 

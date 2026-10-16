@@ -261,19 +261,21 @@ func TestViewSurvivesRelist(t *testing.T) {
 func TestForeignRowsRenderReasons(t *testing.T) {
 	a := newTestApp(&fakeBackend{})
 	it := attentionItem(model.SectionReviewRequested, 1, 0, "Look again", "review requested", "mentioned you")
-	for _, w := range []int{120, 70} {
-		l1, l2 := a.renderRow(it, false, w)
-		if ansi.StringWidth(l1) > w || ansi.StringWidth(l2) > w {
-			t.Errorf("width %d: row overflows: %q / %q", w, ansi.Strip(l1), ansi.Strip(l2))
+	for w, want := range map[int]string{
+		120: "o/r#1 · alice · just now · review requested, mentioned you",
+		70:  "review requested, mentioned you",
+	} {
+		rows := a.renderRow(it, false, w)
+		assertRowFits(t, rows, w)
+		if strings.Contains(ansi.Strip(rows[0]), "mentioned you") {
+			t.Errorf("width %d: reasons on line 1: %q", w, ansi.Strip(rows[0]))
 		}
-		if strings.Contains(ansi.Strip(l1), "mentioned you") {
-			t.Errorf("width %d: reasons on line 1: %q", w, ansi.Strip(l1))
+		last := rows[len(rows)-1]
+		if got := ansi.Strip(last); !strings.HasSuffix(got, want) {
+			t.Errorf("width %d: last line = %q, want suffix %q", w, got, want)
 		}
-		if got, want := ansi.Strip(l2), "o/r#1 · alice · just now · review requested, mentioned you"; !strings.HasSuffix(got, want) {
-			t.Errorf("width %d: line 2 = %q, want suffix %q", w, got, want)
-		}
-		if want := a.st.accent.Render("review requested, mentioned you"); !strings.Contains(l2, want) {
-			t.Errorf("width %d: reasons are not accent colored: %q", w, l2)
+		if want := a.st.accent.Render("review requested, mentioned you"); !strings.Contains(last, want) {
+			t.Errorf("width %d: reasons are not accent colored: %q", w, last)
 		}
 	}
 
@@ -281,7 +283,7 @@ func TestForeignRowsRenderReasons(t *testing.T) {
 	// reasons do not stand in for.
 	it.PR.ReviewDecision = "APPROVED"
 	it.PR.Mergeable = "CONFLICTING"
-	_, l2 := a.renderRow(it, false, 140)
+	l2 := a.renderRow(it, false, 140)[1]
 	if got, want := ansi.Strip(l2), "o/r#1 · alice · just now · approved · review requested, mentioned you · merge conflict"; !strings.HasSuffix(got, want) {
 		t.Errorf("line 2 = %q, want suffix %q", got, want)
 	}
