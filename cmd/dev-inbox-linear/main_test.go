@@ -262,3 +262,16 @@ func TestRunError(t *testing.T) {
 		t.Errorf("stderr %q", stderr.String())
 	}
 }
+
+func TestVersionFlag(t *testing.T) {
+	defer func(v string) { version = v }(version)
+	version = "1.2.3"
+	var stdout bytes.Buffer
+	err := run(context.Background(), func(context.Context, linearplugin.Config) error {
+		t.Error("plugin started")
+		return nil
+	}, func(string) string { return "" }, []string{"--version"}, &stdout, &bytes.Buffer{})
+	if err != nil || stdout.String() != "dev-inbox-linear version 1.2.3\n" {
+		t.Errorf("--version = %q, %v", stdout.String(), err)
+	}
+}

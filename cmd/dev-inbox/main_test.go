@@ -322,3 +322,13 @@ func TestHelp(t *testing.T) {
 		})
 	}
 }
+
+func TestVersionFlag(t *testing.T) {
+	setupEnv(t)
+	defer func(v string) { version = v }(version)
+	version = "1.2.3"
+	res := runCLI(t, "--version")
+	if res.err != nil || res.stdout != "dev-inbox version 1.2.3\n" || res.tuiURL != nil {
+		t.Errorf("--version = %q, %v, tui started %v", res.stdout, res.err, res.tuiURL != nil)
+	}
+}

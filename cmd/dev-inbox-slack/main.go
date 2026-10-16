@@ -58,6 +58,9 @@ func defaultDeps() deps {
 	}
 }
 
+// version is set by the release build.
+var version = "dev"
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	err := run(ctx, defaultDeps(), os.Args[1:], os.Stdout, os.Stderr)
@@ -101,8 +104,9 @@ func noArgs(_ *cobra.Command, args []string) error {
 
 func newRootCmd(d deps) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "dev-inbox-slack",
-		Short: "Annotate PRs that tag you in Slack review channels",
+		Use:     "dev-inbox-slack",
+		Version: version,
+		Short:   "Annotate PRs that tag you in Slack review channels",
 		Long: "dev-inbox-slack reads Slack review channels and annotates the PRs linked in messages that tag you, " +
 			"directly or through one of your user groups, with slack.mentions, through the NATS API of dev-inbox serve. " +
 			"PRs the daemon does not know yet are tracked first.\n\n" +

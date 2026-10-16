@@ -32,6 +32,9 @@ func usagef(format string, a ...any) error {
 
 type runFunc func(ctx context.Context, cfg jevplugin.Config) error
 
+// version is set by the release build.
+var version = "dev"
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	err := run(ctx, jevplugin.Run, os.Getenv, os.Args[1:], os.Stdout, os.Stderr)
@@ -68,8 +71,9 @@ func run(ctx context.Context, r runFunc, getenv func(string) string, args []stri
 
 func newRootCmd(r runFunc, getenv func(string) string) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "dev-inbox-jev",
-		Short: "Classify comments on others' PRs with TypeSafe Jev",
+		Use:     "dev-inbox-jev",
+		Version: version,
+		Short:   "Classify comments on others' PRs with TypeSafe Jev",
 		Long: "dev-inbox-jev classifies new comments on others' PRs with TypeSafe Jev and annotates the PRs that need " +
 			"you, through the NATS API of dev-inbox serve.\n\n" +
 			"Settings come from flags, then the config file jev.yaml in the directory of the dev-inbox config file, " +
