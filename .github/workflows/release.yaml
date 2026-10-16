@@ -1,0 +1,60 @@
+# Publishes a GitHub release with binaries, checksums and build provenance. See CONTRIBUTING.md.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, e.g. 0.1.0; tags the head of main as v<version>
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  ci:
+    name: CI
+    # A dispatched release only ever tags main.
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci.yaml
+    permissions:
+      contents: read
+
+  release:
+    name: Publish
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    permissions:
+      contents: write # create the release and its tag
+      id-token: write # sign the provenance attestation
+      attestations: write # store the provenance attestation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # tags and history for the changelog
+          persist-credentials: false
+      - id: tag
+        run: .github/scripts/release-tag.sh
+        env:
+          VERSION: ${{ inputs.version }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false # no cache restored from other runs into a release build
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          distribution: goreleaser
+          version: v2.18.3
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GORELEASER_CURRENT_TAG: ${{ steps.tag.outputs.tag }}
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/checksums.txt
