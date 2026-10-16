@@ -32,6 +32,9 @@ func usagef(format string, a ...any) error {
 
 type runFunc func(ctx context.Context, cfg linearplugin.Config) error
 
+// version is set by the release build.
+var version = "dev"
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	err := run(ctx, linearplugin.Run, os.Getenv, os.Args[1:], os.Stdout, os.Stderr)
@@ -68,8 +71,9 @@ func run(ctx context.Context, r runFunc, getenv func(string) string, args []stri
 
 func newRootCmd(r runFunc, getenv func(string) string) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "dev-inbox-linear",
-		Short: "Annotate PRs whose Linear issues are due soon",
+		Use:     "dev-inbox-linear",
+		Version: version,
+		Short:   "Annotate PRs whose Linear issues are due soon",
 		Long: "dev-inbox-linear links PRs to Linear issues and annotates the PRs whose issues, projects or milestones " +
 			"are due soon with linear.urgency, through the NATS API of dev-inbox serve.\n\n" +
 			"Settings come from flags, then the config file linear.yaml in the directory of the dev-inbox config file, " +

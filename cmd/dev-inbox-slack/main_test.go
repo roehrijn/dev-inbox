@@ -435,3 +435,14 @@ func TestRunError(t *testing.T) {
 		t.Errorf("stderr %q", stderr.String())
 	}
 }
+
+func TestVersionFlag(t *testing.T) {
+	defer func(v string) { version = v }(version)
+	version = "1.2.3"
+	td := &testDeps{}
+	var stdout bytes.Buffer
+	err := run(context.Background(), td.deps(env(nil)), []string{"--version"}, &stdout, &bytes.Buffer{})
+	if err != nil || stdout.String() != "dev-inbox-slack version 1.2.3\n" {
+		t.Errorf("--version = %q, %v", stdout.String(), err)
+	}
+}

@@ -41,6 +41,9 @@ type runners struct {
 	serve func(ctx context.Context, cfg daemon.Config) error
 }
 
+// version is set by the release build.
+var version = "dev"
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	err := run(ctx, runners{tui: tui.Run, serve: daemon.Run}, os.Args[1:], os.Stdout, os.Stderr)
@@ -76,8 +79,9 @@ func run(ctx context.Context, r runners, args []string, stdout, stderr io.Writer
 
 func newRootCmd(r runners) *cobra.Command {
 	root := &cobra.Command{
-		Use:   "dev-inbox",
-		Short: "Terminal mimic of the GitHub PR inbox",
+		Use:     "dev-inbox",
+		Version: version,
+		Short:   "Terminal mimic of the GitHub PR inbox",
 		Long: "dev-inbox runs the PR inbox TUI, a client of the daemon started with dev-inbox serve.\n\n" +
 			"Settings come from flags, then the config file, then built-in defaults.",
 		Args:          noArgs,
