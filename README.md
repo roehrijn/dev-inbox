@@ -17,7 +17,20 @@ comments want from you, the [Linear plugin](#linear-plugin) flags PRs whose issu
 
 ## Install
 
+Download the archive for your platform (Linux or macOS, amd64 or arm64) from the
+[latest release](https://github.com/roehrijn/dev-inbox/releases/latest), check it and put the binaries on your
+`PATH`:
+
 ```sh
+gh release download --repo roehrijn/dev-inbox --pattern '*linux_amd64.tar.gz' --pattern checksums.txt
+sha256sum --check --ignore-missing checksums.txt
+tar xzf dev-inbox_*_linux_amd64.tar.gz -C ~/.local/bin dev-inbox dev-inbox-jev dev-inbox-linear dev-inbox-slack
+```
+
+Or build from source:
+
+```sh
+go install github.com/roehrijn/dev-inbox/cmd/...@latest
 nix build                  # ./result/bin/dev-inbox, dev-inbox-jev, dev-inbox-linear and dev-inbox-slack
 nix run . -- serve         # run without installing
 go install ./cmd/...       # to $(go env GOBIN)
@@ -170,7 +183,7 @@ private PR content (see [Jev plugin](#jev-plugin)), and so does the journal then
 
 ### Upgrading
 
-Rebuild, then restart the daemon, the plugins and every open TUI; running processes keep the old binary.
+Install the new release or rebuild, then restart the daemon, the plugins and every open TUI; running processes keep the old binary.
 Stored PRs gain new fields on their next full fetch from GitHub. If they look incomplete or wrong after an upgrade,
 stop the daemon and delete the state directory (default `~/.local/state/dev-inbox`); the next start imports
 everything again. That loses annotations, such as hidden PRs and plugin results, and the event history.
@@ -620,6 +633,8 @@ is logged, and the next one retries, honoring `Retry-After`. If the daemon is do
 the next one catches up.
 
 ## Development
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for commit conventions, CI and how releases are cut.
 
 ```sh
 just build   # bin/dev-inbox, bin/dev-inbox-jev, bin/dev-inbox-linear and bin/dev-inbox-slack

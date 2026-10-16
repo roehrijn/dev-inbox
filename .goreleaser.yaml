@@ -1,0 +1,66 @@
+# Release build, run by .github/workflows/release.yaml. See CONTRIBUTING.md for the release process.
+version: 2
+
+project_name: dev-inbox
+
+before:
+  hooks:
+    - go mod verify
+
+builds:
+  - &build
+    id: dev-inbox
+    main: ./cmd/dev-inbox
+    binary: dev-inbox
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+  - <<: *build
+    id: dev-inbox-jev
+    main: ./cmd/dev-inbox-jev
+    binary: dev-inbox-jev
+  - <<: *build
+    id: dev-inbox-linear
+    main: ./cmd/dev-inbox-linear
+    binary: dev-inbox-linear
+  - <<: *build
+    id: dev-inbox-slack
+    main: ./cmd/dev-inbox-slack
+    binary: dev-inbox-slack
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - CONTRIBUTING.md
+      - LICENSE*
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Other changes
+      order: 999
+  filters:
+    exclude:
+      - '^.*?(docs|test|chore|ci)(\(.+\))??!?:.+$'
+
+release:
+  # A dispatched release tags the commit only here, when GitHub creates the release.
+  target_commitish: "{{ .FullCommit }}"
+  prerelease: auto

@@ -15,3 +15,6 @@ lint *args='./...':
 
 fmt:
     gofmt -w .
+
+release-snapshot:
+    goreleaser release --snapshot --clean
