@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/roehrijn/dev-inbox/internal/httpx"
 )
 
 const (
@@ -42,7 +44,7 @@ func (cfg OAuthConfig) withDefaults() OAuthConfig {
 		cfg.BaseURL = DefaultBaseURL
 	}
 	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = &http.Client{Timeout: defaultTimeout}
+		cfg.HTTPClient = &http.Client{Timeout: defaultTimeout, Transport: httpx.Transport()}
 	}
 	return cfg
 }

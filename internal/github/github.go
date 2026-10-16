@@ -20,6 +20,7 @@ import (
 	"github.com/cli/go-gh/v2/pkg/api"
 	"github.com/cli/go-gh/v2/pkg/auth"
 
+	"github.com/roehrijn/dev-inbox/internal/httpx"
 	"github.com/roehrijn/dev-inbox/internal/model"
 )
 
@@ -46,7 +47,7 @@ func NewClient() (*Client, error) {
 	if token == "" {
 		return nil, errors.New("no github.com token found, run gh auth login")
 	}
-	return newClient(api.ClientOptions{Host: host, AuthToken: token, Timeout: time.Minute}, apiBaseURL)
+	return newClient(api.ClientOptions{Host: host, AuthToken: token, Timeout: time.Minute, Transport: httpx.Transport()}, apiBaseURL)
 }
 
 func newClient(opts api.ClientOptions, baseURL string) (*Client, error) {

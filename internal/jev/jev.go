@@ -22,6 +22,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/roehrijn/dev-inbox/internal/httpx"
 )
 
 const (
@@ -151,7 +153,7 @@ type Config struct {
 	Timeout time.Duration // per attempt, default DefaultTimeout
 	// MaxRetries is the number of retries after the first attempt; 0 disables retries.
 	MaxRetries int
-	HTTPClient *http.Client // default http.DefaultClient
+	HTTPClient *http.Client // default a client with HTTP/2 health checks
 	Logger     *slog.Logger // default slog.Default()
 }
 
@@ -187,7 +189,7 @@ func New(cfg Config) (*Client, error) {
 		c.timeout = DefaultTimeout
 	}
 	if c.http == nil {
-		c.http = http.DefaultClient
+		c.http = &http.Client{Transport: httpx.Transport()}
 	}
 	if c.log == nil {
 		c.log = slog.Default()

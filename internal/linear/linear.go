@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/roehrijn/dev-inbox/internal/httpx"
 )
 
 const (
@@ -61,7 +63,7 @@ func New(cfg Config) (*Client, error) {
 		c.url = DefaultBaseURL
 	}
 	if c.http == nil {
-		c.http = &http.Client{Timeout: defaultTimeout}
+		c.http = &http.Client{Timeout: defaultTimeout, Transport: httpx.Transport()}
 	}
 	if c.log == nil {
 		c.log = slog.Default()
