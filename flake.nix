@@ -40,6 +40,7 @@
           '';
           meta = {
             description = "Terminal mimic of the GitHub PR inbox backed by an event-driven daemon";
+            license = pkgs.lib.licenses.mit;
             mainProgram = "dev-inbox";
           };
         };

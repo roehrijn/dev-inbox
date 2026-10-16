@@ -649,3 +649,7 @@ dependencies, or importing a package not imported before (even from a module alr
 set `vendorHash` in `flake.nix` to `nixpkgs.lib.fakeHash`, run `nix build 'path:.#default'` and paste
 the reported hash. Keeping the old hash silently reuses the cached vendor directory and the build
 fails with "inconsistent vendoring" or "cannot find module providing package".
+
+## License
+
+[MIT](LICENSE)
