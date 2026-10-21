@@ -341,6 +341,12 @@ The detail pane (`d`) lists how the score adds up, one line per term, e.g. `team
 Row symbols before the title: `★` review requested from you personally, `✓` / `✗` / `●` checks passed / failing /
 running, `◌` draft.
 
+On your own PRs the row shows the reviews instead of GitHub's review decision, e.g.
+`✗ carol · ✓ erin, frank · ● dave · awaiting acme-co/eng, bob`: who requested changes, approved or only commented,
+then the users and teams asked to review. As on GitHub, a later comment does not undo an approval or a change
+request, and a reviewer asked again is listed under awaiting only. Without reviews and review requests the decision
+stays, e.g. `review required`.
+
 The status bar lists every NATS micro service that answers a `$SRV.PING`, such as a plugin, e.g. `devinbox-jev ●`,
 `devinbox-linear ●` or `devinbox-slack ●`.
 

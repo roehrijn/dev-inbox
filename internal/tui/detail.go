@@ -420,12 +420,7 @@ func (a *app) writeChecks(b *strings.Builder, pr model.PR, w int) {
 }
 
 func (a *app) writeReviews(b *strings.Builder, pr model.PR, w int) {
-	// GitHub shows each reviewer's latest review.
-	var latest []model.Review
-	for _, r := range pr.Reviews {
-		latest = slices.DeleteFunc(latest, func(o model.Review) bool { return strings.EqualFold(o.Author, r.Author) })
-		latest = append(latest, r)
-	}
+	latest := reviewVerdicts(pr)
 	if len(latest) == 0 && len(pr.ReviewRequests) == 0 {
 		return
 	}
@@ -451,10 +446,8 @@ func (a *app) writeReviews(b *strings.Builder, pr model.PR, w int) {
 	if len(pr.ReviewRequests) > 0 {
 		var names []string
 		for _, rr := range pr.ReviewRequests {
-			if rr.Login != "" {
-				names = append(names, rr.Login)
-			} else if rr.Team != "" {
-				names = append(names, rr.Team)
+			if n := reviewRequestName(rr); n != "" {
+				names = append(names, n)
 			}
 		}
 		b.WriteString(ansi.Wrap("  "+a.st.warning.Render("○")+" "+a.st.muted.Render("awaiting ")+strings.Join(names, ", "), w, " ") + "\n")

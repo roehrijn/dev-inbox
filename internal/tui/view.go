@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -347,8 +348,13 @@ func (a *app) renderRow(it api.InboxItem, selected bool, w int) []string {
 		ident = append(ident, a.st.draft.Render("draft"))
 	}
 	var state []string
-	if d := a.decision(pr.ReviewDecision, it.Reasons); d != "" {
-		state = append(state, d)
+	if a.own(pr) {
+		state = a.reviewSummary(pr)
+	}
+	if len(state) == 0 {
+		if d := a.decision(pr.ReviewDecision, it.Reasons); d != "" {
+			state = append(state, d)
+		}
 	}
 	if len(it.Reasons) > 0 {
 		state = append(state, a.st.accent.Render(strings.Join(it.Reasons, ", ")))
@@ -420,6 +426,66 @@ func (a *app) decision(d string, reasons []string) string {
 		return a.st.warning.Render(label)
 	}
 	return a.st.muted.Render(label)
+}
+
+func (a *app) own(pr model.PR) bool {
+	return a.viewer.Login != "" && strings.EqualFold(pr.Author, a.viewer.Login)
+}
+
+// reviewVerdicts returns each reviewer's standing review in the order they first reviewed: the
+// latest approval or change request, else the latest review. As on GitHub, a comment does not
+// undo an approval or a change request. Reviews by the PR's author are left out.
+func reviewVerdicts(pr model.PR) []model.Review {
+	var out []model.Review
+	for _, r := range pr.Reviews {
+		if strings.EqualFold(r.Author, pr.Author) {
+			continue
+		}
+		i := slices.IndexFunc(out, func(o model.Review) bool { return strings.EqualFold(o.Author, r.Author) })
+		switch {
+		case i < 0:
+			out = append(out, r)
+		case r.State != "COMMENTED" || out[i].State == "COMMENTED":
+			out[i] = r
+		}
+	}
+	return out
+}
+
+func reviewRequestName(rr model.ReviewRequest) string {
+	if rr.Login != "" {
+		return rr.Login
+	}
+	return rr.Team
+}
+
+// reviewSummary sums up the reviews of a PR for its author, most actionable first: who requested
+// changes, approved or only commented, and which users and teams are asked to review. A
+// reviewer asked again counts as asked only. Empty without reviews and review requests.
+func (a *app) reviewSummary(pr model.PR) []string {
+	var asked []string
+	for _, rr := range pr.ReviewRequests {
+		if n := reviewRequestName(rr); n != "" {
+			asked = append(asked, n)
+		}
+	}
+	by := map[string][]string{}
+	for _, r := range reviewVerdicts(pr) {
+		if !slices.ContainsFunc(asked, func(n string) bool { return strings.EqualFold(n, r.Author) }) {
+			by[r.State] = append(by[r.State], r.Author)
+		}
+	}
+	var parts []string
+	add := func(icon string, names []string) {
+		if len(names) > 0 {
+			parts = append(parts, icon+" "+a.st.muted.Render(strings.Join(names, ", ")))
+		}
+	}
+	add(a.st.danger.Render("✗"), by["CHANGES_REQUESTED"])
+	add(a.st.success.Render("✓"), by["APPROVED"])
+	add(a.st.muted.Render("●"), append(by["COMMENTED"], by["DISMISSED"]...))
+	add(a.st.warning.Render("awaiting"), asked)
+	return parts
 }
 
 const mergeConflict = "merge conflict"
