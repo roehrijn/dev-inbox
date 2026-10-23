@@ -21,6 +21,8 @@ const (
 	wideRowMinWidth = 100
 	// rowIndent is the width of the gutter, direct flag and checks icon in front of a title.
 	rowIndent = 6
+	// stackIndent is the extra indentation of a row per level of stacking.
+	stackIndent = 2
 	// splitMinWidth is the narrowest terminal that shows the detail pane beside the list.
 	splitMinWidth = 110
 	minListWidth  = 50
@@ -258,7 +260,7 @@ func (a *app) listLines(w int) []string {
 			continue
 		}
 		for ri, it := range s.items {
-			lines = append(lines, a.renderRow(it, hasSel && sel.sec == si && sel.row == ri, w)...)
+			lines = append(lines, a.renderRow(it, s.depth[ri], hasSel && sel.sec == si && sel.row == ri, w)...)
 		}
 	}
 	// Not tabCount: PRs hidden until new activity are left out of it but still listed.
@@ -302,16 +304,22 @@ func (a *app) renderSectionHeader(s section, collapsed, focused bool, w int) str
 }
 
 // renderRow renders the rowHeight(w) lines of a row: the title, then the PR's identity and
-// state, which go on separate lines in a narrow list.
-func (a *app) renderRow(it api.InboxItem, selected bool, w int) []string {
+// state, which go on separate lines in a narrow list. A PR stacked depth levels deep is
+// indented by stackIndent cells per level, with a connector below its parent's checks icon.
+func (a *app) renderRow(it api.InboxItem, depth int, selected bool, w int) []string {
 	pr := it.PR
 	gutter := a.gutter(selected)
 	flag := " "
 	if it.Direct {
 		flag = a.st.accentBold.Render("★")
 	}
-	prefix := gutter + " " + flag + " " + a.checkIcon(pr.Checks) + " "
-	avail := max(w-rowIndent, 0)
+	var stack string
+	if depth > 0 {
+		stack = strings.Repeat(" ", stackIndent*(depth-1)) + a.st.subtle.Render("└ ")
+	}
+	indent := rowIndent + stackIndent*depth
+	prefix := gutter + " " + flag + " " + stack + a.checkIcon(pr.Checks) + " "
+	avail := max(w-indent, 0)
 
 	tail := a.renderTail(it, avail/2)
 	tw := ansi.StringWidth(tail)
@@ -363,7 +371,7 @@ func (a *app) renderRow(it api.InboxItem, selected bool, w int) []string {
 		state = append(state, c)
 	}
 	meta := func(parts []string) string {
-		s := gutter + strings.Repeat(" ", rowIndent-1) + strings.Join(parts, a.st.muted.Render(" · "))
+		s := gutter + strings.Repeat(" ", indent-1) + strings.Join(parts, a.st.muted.Render(" · "))
 		return ansi.Truncate(s, w, "…")
 	}
 	line1 = ansi.Truncate(line1, w, "")

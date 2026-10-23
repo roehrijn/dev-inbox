@@ -167,7 +167,7 @@ func TestRowScore(t *testing.T) {
 			a := newTestApp(&fakeBackend{})
 			it := item(prKey("o", "r", 1), model.SectionNeedsAction, "Fix the flaky webhook test", time.Hour)
 			it.Score, it.Annotations = tt.score, tt.badges
-			plain := ansi.Strip(a.renderRow(it, false, tt.w)[0])
+			plain := ansi.Strip(a.renderRow(it, 0, false, tt.w)[0])
 			if got := ansi.StringWidth(plain); got > tt.w {
 				t.Errorf("first line is %d cells wide, max %d: %q", got, tt.w, plain)
 			}
@@ -189,7 +189,7 @@ func TestRowScoreSurvivesTinyWidths(t *testing.T) {
 	it := item(prKey("o", "r", 1), model.SectionNeedsAction, "Fix the flaky webhook test", time.Hour)
 	it.Score = 100
 	for w := 0; w <= 12; w++ {
-		assertRowFits(t, a.renderRow(it, true, w), w)
+		assertRowFits(t, a.renderRow(it, 0, true, w), w)
 	}
 }
 
@@ -217,7 +217,7 @@ func TestRowSplitsMetaWhenNarrow(t *testing.T) {
 		{40, []string{"o/r#1 · alice · 1h ago", "approved · checks failing"}},
 	}
 	for _, tt := range tests {
-		rows := a.renderRow(it, false, tt.w)
+		rows := a.renderRow(it, 0, false, tt.w)
 		if len(rows) != rowHeight(tt.w) {
 			t.Fatalf("width %d: %d lines, want %d", tt.w, len(rows), rowHeight(tt.w))
 		}
@@ -230,7 +230,7 @@ func TestRowSplitsMetaWhenNarrow(t *testing.T) {
 	}
 
 	it.Reasons, it.PR.ReviewDecision = nil, ""
-	if got := a.renderRow(it, false, 40)[2]; strings.TrimSpace(got) != "" {
+	if got := a.renderRow(it, 0, false, 40)[2]; strings.TrimSpace(got) != "" {
 		t.Errorf("state line of a PR without state = %q, want blank", ansi.Strip(got))
 	}
 }
@@ -255,7 +255,7 @@ func TestRowDraftMark(t *testing.T) {
 			it := item(prKey("o", "r", 1), model.SectionDrafts, tt.title, time.Hour)
 			it.PR.IsDraft = tt.draft
 			it.Score = 20
-			rows := a.renderRow(it, false, tt.w)
+			rows := a.renderRow(it, 0, false, tt.w)
 			l1, l2 := rows[0], rows[1]
 			plain := ansi.Strip(l1)
 			if got := ansi.StringWidth(plain); got > tt.w {

@@ -44,7 +44,7 @@ func TestRowConflictMarker(t *testing.T) {
 		for _, w := range []int{120, 80} {
 			t.Run(fmt.Sprintf("%s/w%d", tt.name, w), func(t *testing.T) {
 				a := newTestApp(&fakeBackend{})
-				rows := a.renderRow(tt.it, false, w)
+				rows := a.renderRow(tt.it, 0, false, w)
 				l1, meta := rows[0], ansi.Strip(strings.Join(rows[1:], "\n"))
 				if got := strings.Count(meta, mergeConflict); got != tt.want {
 					t.Errorf("width %d: %d markers below the title, want %d: %q", w, got, tt.want, meta)
@@ -61,7 +61,7 @@ func TestRowConflictMarkerFollowsMetadata(t *testing.T) {
 	a := newTestApp(&fakeBackend{})
 	it := conflictItem(model.SectionReviewRequested, "CONFLICTING")
 	it.PR.IsDraft = true
-	l2 := a.renderRow(it, false, 120)[1]
+	l2 := a.renderRow(it, 0, false, 120)[1]
 	if got, want := ansi.Strip(l2), "o/r#1 · alice · 1h ago · draft · merge conflict"; !strings.HasSuffix(got, want) {
 		t.Errorf("line 2 = %q, want suffix %q", got, want)
 	}
@@ -70,7 +70,7 @@ func TestRowConflictMarkerFollowsMetadata(t *testing.T) {
 	}
 
 	it = conflictItem(model.SectionNeedsAction, "CONFLICTING", "checks failing", "merge conflict")
-	l2 = a.renderRow(it, false, 120)[1]
+	l2 = a.renderRow(it, 0, false, 120)[1]
 	if got, want := ansi.Strip(l2), "o/r#1 · alice · 1h ago · checks failing, merge conflict"; !strings.HasSuffix(got, want) {
 		t.Errorf("line 2 = %q, want suffix %q", got, want)
 	}
@@ -80,7 +80,7 @@ func TestRowConflictMarkerSurvivesNarrowWidths(t *testing.T) {
 	a := newTestApp(&fakeBackend{})
 	it := conflictItem(model.SectionInvolved, "CONFLICTING")
 	for w := 0; w <= 60; w++ {
-		assertRowFits(t, a.renderRow(it, true, w), w)
+		assertRowFits(t, a.renderRow(it, 0, true, w), w)
 	}
 }
 

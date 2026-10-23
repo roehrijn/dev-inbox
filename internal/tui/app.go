@@ -78,6 +78,8 @@ type (
 type section struct {
 	id    model.Section
 	items []api.InboxItem
+	// depth holds the stack depth of each item, see nestStacks.
+	depth []int
 	// hidden counts the PRs of the section left out of items, see hiddenFromList.
 	hidden int
 }
@@ -558,9 +560,10 @@ func hiddenFromList(it api.InboxItem, all bool) bool {
 }
 
 // groupItems sorts items into displaySections order; inside a section the highest score
-// comes first, then the most recently updated. Items without a known model section are
-// dropped. Hidden items go to the hidden section of their tab whatever the view and score;
-// of the others, those matching hiddenFromList are only counted in section.hidden.
+// comes first, then the most recently updated, and stacked PRs follow the PR they are
+// stacked on. Items without a known model section are dropped. Hidden items go to the
+// hidden section of their tab whatever the view and score; of the others, those matching
+// hiddenFromList are only counted in section.hidden.
 func groupItems(items []api.InboxItem, all bool) []section {
 	secs := make([]section, len(displaySections))
 	idx := map[model.Section]int{}
@@ -582,7 +585,8 @@ func groupItems(items []api.InboxItem, all bool) []section {
 		}
 		secs[i].items = append(secs[i].items, it)
 	}
-	for _, s := range secs {
+	for i := range secs {
+		s := &secs[i]
 		slices.SortStableFunc(s.items, func(x, y api.InboxItem) int {
 			if c := cmp.Compare(y.Score, x.Score); c != 0 {
 				return c
@@ -592,8 +596,59 @@ func groupItems(items []api.InboxItem, all bool) []section {
 			}
 			return cmp.Compare(x.PR.Key.String(), y.PR.Key.String())
 		})
+		s.items, s.depth = nestStacks(s.items)
 	}
 	return secs
+}
+
+// nestStacks moves every PR whose base branch is the head branch of another of items, in
+// the same repository, right behind that PR, keeping the order of items among siblings.
+// It returns the reordered items and the depth of each: 0 for a PR not stacked on one of
+// items, the parent's depth plus one otherwise.
+func nestStacks(items []api.InboxItem) ([]api.InboxItem, []int) {
+	type branch struct{ owner, repo, ref string }
+	branchOf := func(k model.PRKey, ref string) branch {
+		return branch{strings.ToLower(k.Owner), strings.ToLower(k.Repo), ref}
+	}
+	heads := map[branch]int{}
+	for i, it := range items {
+		if it.PR.HeadRef != "" {
+			heads[branchOf(it.PR.Key, it.PR.HeadRef)] = i
+		}
+	}
+	children := make([][]int, len(items))
+	stacked := make([]bool, len(items))
+	for i, it := range items {
+		if p, ok := heads[branchOf(it.PR.Key, it.PR.BaseRef)]; ok && it.PR.BaseRef != "" && p != i {
+			children[p] = append(children[p], i)
+			stacked[i] = true
+		}
+	}
+	out := make([]api.InboxItem, 0, len(items))
+	depth := make([]int, 0, len(items))
+	done := make([]bool, len(items))
+	var visit func(i, d int)
+	visit = func(i, d int) {
+		if done[i] {
+			return
+		}
+		done[i] = true
+		out = append(out, items[i])
+		depth = append(depth, d)
+		for _, c := range children[i] {
+			visit(c, d+1)
+		}
+	}
+	for i := range items {
+		if !stacked[i] {
+			visit(i, 0)
+		}
+	}
+	// PRs stacked in a cycle have no root.
+	for i := range items {
+		visit(i, 0)
+	}
+	return out, depth
 }
 
 // total counts all PRs, hidden ones included.

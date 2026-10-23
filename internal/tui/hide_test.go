@@ -488,8 +488,8 @@ func TestHiddenMarkIsNoBadgeNorListedAnnotation(t *testing.T) {
 	bare := it
 	bare.Annotations = nil
 	it.Annotations = []model.Annotation{mark}
-	l1 := a.renderRow(it, false, 100)[0]
-	l0 := a.renderRow(bare, false, 100)[0]
+	l1 := a.renderRow(it, 0, false, 100)[0]
+	l0 := a.renderRow(bare, 0, false, 100)[0]
 	if l1 != l0 {
 		t.Errorf("mark changes the row:\n%q\nwant\n%q", ansi.Strip(l1), ansi.Strip(l0))
 	}

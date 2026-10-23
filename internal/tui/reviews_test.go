@@ -67,7 +67,7 @@ func TestRowReviewSummaryOnOwnPRs(t *testing.T) {
 	it.PR.Key = prKey("o", "r", 1)
 
 	want := "✗ carol · ✓ erin, frank · ● dave · awaiting acme-co/eng, bob"
-	wide := a.renderRow(it, false, 140)
+	wide := a.renderRow(it, 0, false, 140)
 	if got := ansi.Strip(wide[1]); !strings.HasSuffix(got, want) {
 		t.Errorf("wide line 2 = %q, want suffix %q", got, want)
 	}
@@ -79,7 +79,7 @@ func TestRowReviewSummaryOnOwnPRs(t *testing.T) {
 			t.Errorf("line 2 lacks %q: %q", s, wide[1])
 		}
 	}
-	narrow := a.renderRow(it, false, 80)
+	narrow := a.renderRow(it, 0, false, 80)
 	if got := strings.TrimSpace(ansi.Strip(narrow[2])); got != want {
 		t.Errorf("narrow line 3 = %q, want %q", got, want)
 	}
@@ -90,7 +90,7 @@ func TestRowReviewSummaryFallsBackToDecision(t *testing.T) {
 	a.viewer = model.Viewer{Login: "alice"}
 	it := item(prKey("o", "r", 1), model.SectionWaitingForReview, "Mine", time.Hour)
 	it.PR.ReviewDecision = "REVIEW_REQUIRED"
-	if got := ansi.Strip(a.renderRow(it, false, 140)[1]); !strings.HasSuffix(got, "review required") {
+	if got := ansi.Strip(a.renderRow(it, 0, false, 140)[1]); !strings.HasSuffix(got, "review required") {
 		t.Errorf("own PR without reviews: line 2 = %q, want the decision", got)
 	}
 
@@ -99,7 +99,7 @@ func TestRowReviewSummaryFallsBackToDecision(t *testing.T) {
 	other.PR.Author = "zoe"
 	other.PR.ReviewDecision = "CHANGES_REQUESTED"
 	other.PR.Reviews = []model.Review{review("bob", "CHANGES_REQUESTED")}
-	got := ansi.Strip(a.renderRow(other, false, 140)[1])
+	got := ansi.Strip(a.renderRow(other, 0, false, 140)[1])
 	if !strings.HasSuffix(got, "changes requested") || strings.Contains(got, "✗ bob") {
 		t.Errorf("others' PR: line 2 = %q, want the decision only", got)
 	}

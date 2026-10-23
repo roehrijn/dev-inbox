@@ -265,7 +265,7 @@ func TestForeignRowsRenderReasons(t *testing.T) {
 		120: "o/r#1 · alice · just now · review requested, mentioned you",
 		70:  "review requested, mentioned you",
 	} {
-		rows := a.renderRow(it, false, w)
+		rows := a.renderRow(it, 0, false, w)
 		assertRowFits(t, rows, w)
 		if strings.Contains(ansi.Strip(rows[0]), "mentioned you") {
 			t.Errorf("width %d: reasons on line 1: %q", w, ansi.Strip(rows[0]))
@@ -283,7 +283,7 @@ func TestForeignRowsRenderReasons(t *testing.T) {
 	// reasons do not stand in for.
 	it.PR.ReviewDecision = "APPROVED"
 	it.PR.Mergeable = "CONFLICTING"
-	l2 := a.renderRow(it, false, 140)[1]
+	l2 := a.renderRow(it, 0, false, 140)[1]
 	if got, want := ansi.Strip(l2), "o/r#1 · alice · just now · approved · review requested, mentioned you · merge conflict"; !strings.HasSuffix(got, want) {
 		t.Errorf("line 2 = %q, want suffix %q", got, want)
 	}
