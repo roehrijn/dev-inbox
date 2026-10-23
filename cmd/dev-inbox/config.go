@@ -50,6 +50,7 @@ type settings struct {
 		ReconcileInterval string   `mapstructure:"reconcile-interval"`
 		LogLevel          string   `mapstructure:"log-level"`
 		Greylist          []string `mapstructure:"greylist"`
+		RoleTeams         []string `mapstructure:"role-teams"`
 		// PreferredTeams stays raw like Score: preferredTeams rejects 1.5 or "20" instead of coercing them.
 		PreferredTeams map[string]any `mapstructure:"preferred-teams"`
 		// Score stays raw: decoding into ints would coerce 1.5 or "20", which scoreWeights rejects.

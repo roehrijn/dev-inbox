@@ -87,7 +87,7 @@ func defaultServeConfig() daemon.Config {
 	}
 }
 
-// sameConfig compares configs ignoring the logger and the nil-ness of the greylist and the teams.
+// sameConfig compares configs ignoring the logger and the nil-ness of the greylist, the teams and the role teams.
 func sameConfig(got, want daemon.Config) bool {
 	got.Logger, want.Logger = nil, nil
 	if len(got.Greylist) == 0 && len(want.Greylist) == 0 {
@@ -95,6 +95,9 @@ func sameConfig(got, want daemon.Config) bool {
 	}
 	if len(got.PreferredTeams) == 0 && len(want.PreferredTeams) == 0 {
 		got.PreferredTeams, want.PreferredTeams = nil, nil
+	}
+	if len(got.RoleTeams) == 0 && len(want.RoleTeams) == 0 {
+		got.RoleTeams, want.RoleTeams = nil, nil
 	}
 	return reflect.DeepEqual(got, want)
 }

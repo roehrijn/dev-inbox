@@ -50,7 +50,8 @@ sections never have those, so one field covers both and the TUI already renders 
 | Signal | Rule | Reason | Weight key (default) |
 |---|---|---|---|
 | review requested | pending request names me directly | `review requested` | existing `direct` (+10) |
-| team review requested | no direct request; a pending request names one of my teams; human, non-greylisted author; not draft; updated within 14 days; no review yet by a human other than the author (bot and greylisted reviews ignored); checks not failing; no merge conflict | `team review requested` | `team-review` (+5) |
+| team review requested | no direct request; a pending request names one of my teams that is not in `serve.role-teams`; human, non-greylisted author; not draft; updated within 14 days; no review yet by a human other than the author (bot and greylisted reviews ignored); checks not failing; no merge conflict | `team review requested` | `team-review` (+5) |
+| role review requested | like team review requested, but no pending request names a team of mine outside `serve.role-teams` and one names a team in it | `role review requested` | `role-review` (+5) |
 | re-review | my head is known and differs from `HeadSHA`, and since my last activity: my latest review is CHANGES_REQUESTED or DISMISSED, or someone else replied in a thread I started or replied in, or such a thread was resolved by someone else | `changes since your review` | `rereview` (+30) |
 | thread reply | someone else (not a bot) replied in a thread I started or replied in after my last activity, and no re-review signal | `reply to your comment` | `thread-reply` (+15) |
 | mentioned | comment by someone else after my last activity containing `@<me>` on word boundaries | `mentioned you` | `mentioned` (+20) |

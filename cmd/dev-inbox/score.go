@@ -45,6 +45,8 @@ var scoreTerms = []scoreTerm{
 		"Points when someone mentioned you after your last activity"},
 	{"team-review", func(w *derive.Weights) *int { return &w.TeamReview },
 		"Points when a review is requested from one of your teams and the PR waits for a reviewer"},
+	{"role-review", func(w *derive.Weights) *int { return &w.RoleReview },
+		"Points when a review is requested from one of your role-teams and the PR waits for a reviewer"},
 }
 
 // scoreWeights overlays the values of the serve.score section on derive.DefaultWeights. Keys that are not

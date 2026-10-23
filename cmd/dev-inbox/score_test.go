@@ -67,10 +67,12 @@ func TestScoreWeights(t *testing.T) {
 			name: "every key",
 			file: "serve:\n  score:\n    urgent: 1\n    greylist: 3\n    direct: 4\n" +
 				"    checks-running: 5\n    checks-success: 6\n    per-failing-check: 7\n    merge-conflict: 8\n" +
-				"    needs-me: 9\n    rereview: 10\n    thread-reply: 11\n    mentioned: 12\n    team-review: 13\n    draft: 14\n",
+				"    needs-me: 9\n    rereview: 10\n    thread-reply: 11\n    mentioned: 12\n    team-review: 13\n" +
+				"    role-review: 15\n    draft: 14\n",
 			want: derive.Weights{
 				Urgent: 1, Greylist: 3, Direct: 4, ChecksRunning: 5, ChecksSuccess: 6, PerFailingCheck: 7,
-				MergeConflict: 8, NeedsMe: 9, Rereview: 10, ThreadReply: 11, Mentioned: 12, TeamReview: 13, Draft: 14,
+				MergeConflict: 8, NeedsMe: 9, Rereview: 10, ThreadReply: 11, Mentioned: 12, TeamReview: 13,
+				RoleReview: 15, Draft: 14,
 			},
 		},
 		{
@@ -173,6 +175,9 @@ func TestConfigCreateScoreBlock(t *testing.T) {
 
 #     # Points when a review is requested from one of your teams and the PR waits for a reviewer
 #     team-review: 5
+
+#     # Points when a review is requested from one of your role-teams and the PR waits for a reviewer
+#     role-review: 5
 
 # tui:
 `

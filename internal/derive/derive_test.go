@@ -2602,6 +2602,7 @@ func TestTeamReview(t *testing.T) {
 		name      string
 		pr        model.PR
 		greylist  []string
+		roles     []string
 		weights   *Weights
 		zeroNow   bool
 		reasons   []string
@@ -2641,6 +2642,52 @@ func TestTeamReview(t *testing.T) {
 				pr.ReviewRequests = []model.ReviewRequest{{Team: "acme-co/core"}, {Login: "viewer"}}
 			}),
 			reasons: []string{ReasonReviewRequested}, wantScore: w.Direct + w.NeedsMe,
+		},
+		{
+			name:    "request for a role",
+			pr:      ready(),
+			roles:   []string{"ACME-co/Core"},
+			reasons: []string{ReasonRoleReviewRequested}, wantScore: w.RoleReview + w.NeedsMe,
+		},
+		{
+			name:    "a role does not make other teams roles",
+			pr:      ready(),
+			roles:   []string{"acme-co/staff"},
+			reasons: wait, wantScore: waitScore,
+		},
+		{
+			name: "team request wins over a role request",
+			pr: ready(func(pr *model.PR) {
+				pr.ReviewRequests = []model.ReviewRequest{{Team: "acme-co/staff"}, {Team: "acme-co/core"}}
+			}),
+			roles:   []string{"acme-co/staff"},
+			reasons: wait, wantScore: waitScore,
+		},
+		{
+			name:  "a role I do not have",
+			pr:    ready(func(pr *model.PR) { pr.ReviewRequests = []model.ReviewRequest{{Team: "acme-co/staff"}} }),
+			roles: []string{"acme-co/staff"},
+		},
+		{
+			name: "direct request wins over a role request",
+			pr: ready(func(pr *model.PR) {
+				pr.ReviewRequests = []model.ReviewRequest{{Team: "acme-co/core"}, {Login: "viewer"}}
+			}),
+			roles:   []string{"acme-co/core"},
+			reasons: []string{ReasonReviewRequested}, wantScore: w.Direct + w.NeedsMe,
+		},
+		{
+			name:  "a review ends the wait for a role",
+			pr:    ready(func(pr *model.PR) { pr.Reviews = []model.Review{review("carol", "COMMENTED")} }),
+			roles: []string{"acme-co/core"},
+		},
+		{
+			name:      "the role weight is configurable",
+			pr:        ready(),
+			roles:     []string{"acme-co/core"},
+			weights:   &Weights{TeamReview: 7, RoleReview: 2, NeedsMe: 11},
+			reasons:   []string{ReasonRoleReviewRequested},
+			wantScore: 2 + 11,
 		},
 		{name: "own PR", pr: ready(func(pr *model.PR) { pr.Author = "viewer" })},
 		{name: "merged PR", pr: ready(func(pr *model.PR) { pr.State = model.PRStateMerged })},
@@ -2764,7 +2811,7 @@ func TestTeamReview(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			in := Inputs{Viewer: viewer, Priority: Priority{Greylist: tt.greylist, Weights: w}, Now: now}
+			in := Inputs{Viewer: viewer, Priority: Priority{Greylist: tt.greylist, Roles: tt.roles, Weights: w}, Now: now}
 			if tt.weights != nil {
 				in.Priority.Weights = *tt.weights
 			}

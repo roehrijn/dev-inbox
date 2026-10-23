@@ -172,6 +172,9 @@ func defineServeFlags(fs *pflag.FlagSet) {
 	fs.StringSlice("greylist", slices.Clone(daemon.DefaultGreylist),
 		"Rank PRs of this author `login` down, with or without a [bot] suffix; "+
 			"repeatable, the first use replaces the defaults, empty disables")
+	fs.StringSlice("role-teams", nil,
+		"GitHub teams by `org/slug` that stand for a role of yours rather than your team; "+
+			"their review requests read \"role review requested\"; repeatable, replaces the config file's list")
 }
 
 // serveConfig merges flags, config file and defaults into the daemon configuration.
@@ -182,9 +185,10 @@ func serveConfig(cmd *cobra.Command) (daemon.Config, error) {
 	}
 	sv := s.Serve
 	cfg := daemon.Config{
-		NATSHost: sv.NATSHost,
-		NATSPort: sv.NATSPort,
-		Greylist: sv.Greylist,
+		NATSHost:  sv.NATSHost,
+		NATSPort:  sv.NATSPort,
+		Greylist:  sv.Greylist,
+		RoleTeams: sv.RoleTeams,
 	}
 	if cfg.StateDir, err = expandHome(sv.StateDir); err != nil {
 		return daemon.Config{}, err
@@ -205,6 +209,11 @@ func serveConfig(cmd *cobra.Command) (daemon.Config, error) {
 	for _, login := range sv.Greylist {
 		if strings.TrimSpace(login) == "" {
 			return daemon.Config{}, usagef("invalid greylist: login must not be empty")
+		}
+	}
+	for _, team := range sv.RoleTeams {
+		if err := validateTeam(team); err != nil {
+			return daemon.Config{}, usagef("invalid role-teams: %w", err)
 		}
 	}
 	if cfg.Weights, err = scoreWeights(sv.Score); err != nil {

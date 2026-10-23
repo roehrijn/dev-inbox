@@ -57,6 +57,7 @@ type Config struct {
 	// PreferredTeams maps "org/slug" to the points PRs of the team's members get; see derive.TeamBoost.
 	PreferredTeams map[string]int
 	Greylist       []string       // used as given; callers wanting the defaults pass DefaultGreylist
+	RoleTeams      []string       // "org/slug"; see derive.Priority.Roles
 	Weights        derive.Weights // used as given; callers wanting the defaults pass derive.DefaultWeights
 }
 
@@ -258,6 +259,7 @@ func (d *daemon) inputs(annotations []model.Annotation) derive.Inputs {
 		Priority: derive.Priority{
 			Teams:    teams,
 			Greylist: d.cfg.Greylist,
+			Roles:    d.cfg.RoleTeams,
 			Weights:  d.cfg.Weights,
 		},
 		Annotations: annotations,

@@ -215,6 +215,7 @@ dev-inbox
 | `--log-level` | `info` | `debug`, `info`, `warn` or `error` |
 | `--preferred-teams` | none | `org/slug=points`; PRs authored by the team's members get the points; comma-separated or repeatable, replaces the file's teams |
 | `--greylist` | `dependabot`, `renovate` | Login whose PRs score -15; repeatable, replaces the defaults; empty (`--greylist=`) disables |
+| `--role-teams` | none | `org/slug` of a team that stands for a role of yours rather than your team; comma-separated or repeatable, replaces the file's list |
 
 Inside each section PRs are ordered by priority score, then last activity; see
 [docs/design.md](docs/design.md#priority-derivescore) for the terms.
@@ -241,6 +242,7 @@ serve:
     acme/platform: 30
     acme/eng: 10
   greylist: [dependabot, renovate, some-bot]
+  role-teams: [acme/staff-engineers]
 tui:
   nats-url: nats://127.0.0.1:14222
 ```
@@ -262,6 +264,8 @@ environment variables.
 - `preferred-teams` maps GitHub teams (`org/slug`, members of child teams included) to the points PRs of their
   members get; negative points rank them down. An author in several teams gets the highest points, not the sum.
   Members are fetched at startup and every 6 hours. Teams given with `--preferred-teams` replace those of the file.
+- `role-teams` lists GitHub teams (`org/slug`) you are in for a role, such as staff engineer, rather than as the team
+  you work in. A review requested from one of them reads `role review requested` instead of `team review requested`.
 
 #### Score weights
 
@@ -284,21 +288,23 @@ serve:
     thread-reply: 15        # someone replied in a review thread you started or joined
     mentioned: 20           # someone mentioned you after your last activity
     team-review: 5          # a review is requested from one of your teams and the PR waits for a reviewer
+    role-review: 5          # a review is requested from one of your role-teams and the PR waits for a reviewer
 ```
 
 The values shown are the defaults. A value must be an integer: `0` disables a term and a negative value ranks PRs
 down. An unknown key or a non-integer value is an error. `dev-inbox config create` includes the block.
 
-The last five terms rank PRs of other authors that need something from you. Each attention reason (`review
-requested`, `team review requested`, `changes since your review`, `reply to your comment`, `mentioned you`) adds
-its own weight, and a PR with at least one reason also gets `needs-me`. Reasons decide which PRs show up, the score
-only orders them, so a PR that needs you is not hidden by a negative score. See
+The last six terms rank PRs of other authors that need something from you. Each attention reason (`review
+requested`, `team review requested`, `role review requested`, `changes since your review`, `reply to your comment`,
+`mentioned you`) adds its own weight, and a PR with at least one reason also gets `needs-me`. Reasons decide which PRs
+show up, the score only orders them, so a PR that needs you is not hidden by a negative score. See
 [docs/proposals/attention.md](docs/proposals/attention.md).
 
-A team review request counts as a reason (`team-review`) only while the PR waits for a first review and is ready for
-one, and no direct request to you applies: it is not a draft, was updated within the last 14 days, has no failing
-checks and no merge conflict, and its author is neither a bot nor greylisted. Any review by someone who is not a bot,
-not greylisted and not the author ends the wait. Pending checks are fine.
+A team or role review request counts as a reason (`team-review` or `role-review`) only while the PR waits for a
+first review and is ready for one, and no direct request to you applies: it is not a draft, was updated within the
+last 14 days, has no failing checks and no merge conflict, and its author is neither a bot nor greylisted. Any review
+by someone who is not a bot, not greylisted and not the author ends the wait. Pending checks are fine. A request to
+one of your teams wins over one to a role.
 
 The plugins do not read this file; each has its own (`jev.yaml`, `linear.yaml` and `slack.yaml` in the same
 directory), see [Jev plugin](#jev-plugin), [Linear plugin](#linear-plugin) and [Slack plugin](#slack-plugin).

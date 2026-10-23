@@ -156,10 +156,11 @@ const (
 	ReasonThreadReply         = "reply to your comment"
 	ReasonMentioned           = "mentioned you"
 	ReasonTeamReviewRequested = "team review requested"
+	ReasonRoleReviewRequested = "role review requested"
 )
 
 // TeamReviewMaxAge is how long a PR may have been idle (see model.PRStatus.UpdatedAt) and still count
-// as waiting for a review from one of the viewer's teams.
+// as waiting for a review from one of the viewer's teams or roles.
 const TeamReviewMaxAge = 14 * 24 * time.Hour
 
 // Annotation value fields with a meaning to derive. A PR-level annotation contributes AnnotationScore
@@ -263,12 +264,17 @@ func attention(pr model.PR, direct bool, in Inputs) ([]string, []model.ScoreTerm
 
 	var reasons []string
 	var terms []model.ScoreTerm
-	switch {
-	case direct:
+	if direct {
 		reasons = append(reasons, ReasonReviewRequested)
-	case teamReview(pr, in):
-		reasons = append(reasons, ReasonTeamReviewRequested)
-		terms = addTerm(terms, ReasonTeamReviewRequested, w.TeamReview)
+	} else {
+		switch team, role := teamReview(pr, in); {
+		case team:
+			reasons = append(reasons, ReasonTeamReviewRequested)
+			terms = addTerm(terms, ReasonTeamReviewRequested, w.TeamReview)
+		case role:
+			reasons = append(reasons, ReasonRoleReviewRequested)
+			terms = addTerm(terms, ReasonRoleReviewRequested, w.RoleReview)
+		}
 	}
 	switch {
 	case rereview(pr, viewer, mine, slices.ContainsFunc(pr.Comments, func(c model.Comment) bool {
@@ -328,25 +334,32 @@ func sumTerms(terms []model.ScoreTerm) int {
 	return n
 }
 
-// teamReview reports whether pr waits for a first human review that one of the viewer's teams was asked
-// for, and is ready for it: not a draft, updated within TeamReviewMaxAge, checks not failing, no merge
-// conflict, and not authored by a bot or a greylisted login. Bots, greylisted logins and the author
-// (GitHub records the author's thread replies as COMMENTED reviews) are not reviewers. The caller has
-// ruled out a direct request, so a request that names the viewer names a team. A zero in.Now disables
-// the signal.
-func teamReview(pr model.PR, in Inputs) bool {
+// teamReview reports whether pr waits for a first human review that one of the viewer's teams (team) or
+// one of their roles (role, see Priority.Roles) was asked for, and is ready for it: not a draft, updated
+// within TeamReviewMaxAge, checks not failing, no merge conflict, and not authored by a bot or a
+// greylisted login. Bots, greylisted logins and the author (GitHub records the author's thread replies as
+// COMMENTED reviews) are not reviewers. The caller has ruled out a direct request, so a request that
+// names the viewer names a team. A zero in.Now disables the signal.
+func teamReview(pr model.PR, in Inputs) (team, role bool) {
 	greylist := in.Priority.Greylist
 	if in.Now.IsZero() || pr.IsDraft || in.Now.Sub(pr.UpdatedAt) > TeamReviewMaxAge ||
 		pr.Checks == model.ChecksFailure || pr.Mergeable == "CONFLICTING" ||
 		isBot(pr.Author) || greylisted(pr.Author, greylist) {
-		return false
+		return false, false
 	}
-	if len(viewerRequests(pr.ReviewRequests, in.Viewer)) == 0 {
-		return false
-	}
-	return !slices.ContainsFunc(pr.Reviews, func(r model.Review) bool {
+	if slices.ContainsFunc(pr.Reviews, func(r model.Review) bool {
 		return !isBot(r.Author) && !greylisted(r.Author, greylist) && !sameUser(r.Author, pr.Author)
-	})
+	}) {
+		return false, false
+	}
+	for _, req := range viewerRequests(pr.ReviewRequests, in.Viewer) {
+		if slices.ContainsFunc(in.Priority.Roles, func(r string) bool { return strings.EqualFold(r, req.Team) }) {
+			role = true
+		} else {
+			team = true
+		}
+	}
+	return team, role
 }
 
 // rereview reports whether the head differs from the commit of the viewer's latest review or inline
@@ -510,6 +523,7 @@ type Weights struct {
 	ThreadReply     int
 	Mentioned       int
 	TeamReview      int
+	RoleReview      int
 }
 
 // DefaultWeights apply unless the config file overrides them.
@@ -527,6 +541,7 @@ var DefaultWeights = Weights{
 	ThreadReply:     15,
 	Mentioned:       20,
 	TeamReview:      5,
+	RoleReview:      5,
 }
 
 // TeamBoost adds Points to the score of PRs authored by a member of Team.
@@ -542,7 +557,10 @@ type Priority struct {
 	Teams []TeamBoost
 	// Greylist holds logins matched case-insensitively, with or without the "[bot]" suffix.
 	Greylist []string
-	Weights  Weights
+	// Roles holds the teams ("org/slug", matched case-insensitively) that stand for a role of the viewer,
+	// such as staff engineer, rather than the team they work in.
+	Roles   []string
+	Weights Weights
 }
 
 // Inputs is everything besides the PR snapshot that classification and scoring depend on.

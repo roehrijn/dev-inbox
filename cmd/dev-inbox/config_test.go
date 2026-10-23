@@ -26,6 +26,7 @@ serve:
     acme/file-team: 25
     acme/other: -5
   greylist: [bot-a, bot-b]
+  role-teams: [acme/staff, acme/leads]
   score:
     urgent: 1
     greylist: 3
@@ -39,6 +40,7 @@ serve:
     thread-reply: 11
     mentioned: 12
     team-review: 13
+    role-review: 15
     draft: 14
 `
 
@@ -51,9 +53,11 @@ func fileServeConfig() daemon.Config {
 		ReconcileInterval: 30 * time.Second,
 		PreferredTeams:    map[string]int{"acme/file-team": 25, "acme/other": -5},
 		Greylist:          []string{"bot-a", "bot-b"},
+		RoleTeams:         []string{"acme/staff", "acme/leads"},
 		Weights: derive.Weights{
 			Urgent: 1, Greylist: 3, Direct: 4, ChecksRunning: 5, ChecksSuccess: 6, PerFailingCheck: 7,
-			MergeConflict: 8, NeedsMe: 9, Rereview: 10, ThreadReply: 11, Mentioned: 12, TeamReview: 13, Draft: 14,
+			MergeConflict: 8, NeedsMe: 9, Rereview: 10, ThreadReply: 11, Mentioned: 12, TeamReview: 13,
+			RoleReview: 15, Draft: 14,
 		},
 	}
 }
@@ -87,10 +91,11 @@ func TestServePrecedence(t *testing.T) {
 			name: "flags over file",
 			file: fullServeFile,
 			args: []string{"--nats-port", "5555", "--poll-interval", "10m", "--greylist", "x",
-				"--preferred-teams", "acme/flag-team=7", "--state-dir", "/flag/state"},
+				"--preferred-teams", "acme/flag-team=7", "--state-dir", "/flag/state", "--role-teams", "acme/flag-role"},
 			want: func() daemon.Config {
 				c := fileServeConfig()
 				c.NATSPort, c.PollInterval, c.Greylist = 5555, 10*time.Minute, []string{"x"}
+				c.RoleTeams = []string{"acme/flag-role"}
 				c.PreferredTeams, c.StateDir = map[string]int{"acme/flag-team": 7}, "/flag/state"
 				return c
 			},
@@ -372,6 +377,7 @@ func TestConfigFileErrors(t *testing.T) {
 		{"quoted points", "serve:\n  preferred-teams:\n    acme/x: '20'\n", "invalid preferred-teams acme/x: points 20"},
 		{"null points", "serve:\n  preferred-teams:\n    acme/x:\n", "invalid preferred-teams acme/x"},
 		{"boolean points", "serve:\n  preferred-teams:\n    acme/x: true\n", "invalid preferred-teams acme/x: points true"},
+		{"role team without org", "serve:\n  role-teams: [staff]\n", `invalid role-teams: "staff"`},
 		{"huge points", "serve:\n  preferred-teams:\n    acme/x: 99999999999999999999\n", "invalid preferred-teams acme/x"},
 		{"blank greylist login", "serve:\n  greylist: [a, ' ']\n", "invalid greylist"},
 		{"fractional score", "serve:\n  score:\n    urgent: 1.5\n", "invalid serve.score.urgent 1.5"},
