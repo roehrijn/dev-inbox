@@ -45,7 +45,9 @@ checksum:
   name_template: checksums.txt
 
 changelog:
-  use: github
+  # Not github: it compares tags through the API, and a dispatched release's tag exists only locally
+  # until GitHub creates the release.
+  use: git
   sort: asc
   groups:
     - title: Features
