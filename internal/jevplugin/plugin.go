@@ -289,12 +289,12 @@ func (p *plugin) stop() {
 	}
 }
 
-// sweep evaluates the foreign open PRs of items, retrying failed ones with backoff up to maxDeliver
+// sweep evaluates the open PRs of items, retrying failed ones with backoff up to maxDeliver
 // attempts, like events.
 func (p *plugin) sweep(ctx context.Context, items []api.InboxItem) {
 	var keys []model.PRKey
 	for _, it := range items {
-		if foreign(it) && p.allowed(it.PR.Key) {
+		if (foreign(it) || mine(it)) && p.allowed(it.PR.Key) {
 			keys = append(keys, it.PR.Key)
 		}
 	}
@@ -332,6 +332,13 @@ func foreign(it api.InboxItem) bool {
 	return it.Section == model.SectionReviewRequested || it.Section == model.SectionInvolved
 }
 
+// mine reports whether it is the viewer's open PR that is no draft, the PRs on which the core counts
+// new comments.
+func mine(it api.InboxItem) bool {
+	return it.Section == model.SectionNeedsAction || it.Section == model.SectionWaitingForReview ||
+		it.Section == model.SectionReadyToMerge
+}
+
 func (p *plugin) allowed(key model.PRKey) bool {
 	if len(p.cfg.Repos) == 0 {
 		return true
@@ -342,7 +349,9 @@ func (p *plugin) allowed(key model.PRKey) bool {
 	})
 }
 
-// evaluate classifies the new candidate comments of key and updates its PR-level annotation.
+// evaluate classifies the new candidate comments of key and, for someone else's PR, updates its
+// PR-level annotation. On the viewer's own PR the comment annotations alone matter: suppressing ones
+// keep a comment from counting as new.
 func (p *plugin) evaluate(ctx context.Context, key model.PRKey) error {
 	p.evalMu.Lock()
 	defer p.evalMu.Unlock()
@@ -359,8 +368,9 @@ func (p *plugin) evaluateLocked(ctx context.Context, log *slog.Logger, key model
 	if err != nil {
 		return err
 	}
-	if !foreign(item) {
-		log.Debug("skipping PR that is not someone else's open PR", "section", item.Section)
+	own := mine(item)
+	if !own && !foreign(item) {
+		log.Debug("skipping PR that is neither someone else's nor the viewer's ready open PR", "section", item.Section)
 		return nil
 	}
 
@@ -377,6 +387,9 @@ func (p *plugin) evaluateLocked(ctx context.Context, log *slog.Logger, key model
 		values[a.CommentID] = v
 	}
 	cands := candidates(item.PR, p.viewer)
+	if own {
+		cands = derive.NewComments(item.PR, p.viewer)
+	}
 	var todo []model.Comment
 	for _, c := range cands {
 		if _, ok := values[c.ID]; !ok {
@@ -400,6 +413,9 @@ func (p *plugin) evaluateLocked(ctx context.Context, log *slog.Logger, key model
 			values[c.ID] = v
 			log.Info("classified comment", "comment_id", c.ID, "intent", v.Intent, "probability", v.Probability)
 		}
+	}
+	if own {
+		return nil
 	}
 	return p.updateAttention(ctx, log, item, result(cands, values, item.Reasons, p.cfg.Weights))
 }

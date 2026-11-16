@@ -83,6 +83,8 @@ Open PRs only; closed and merged get `SectionNone`. Logins compare case-insensit
 New comments: comments by someone other than the viewer, not a bot (login suffix `[bot]`) and not a
 greylisted login (bot accounts that are plain users, such as `loft-bot`), created
 after the viewer's last activity = latest of `LastPushAt`, the viewer's own comments and reviews.
+A comment-level annotation with `"attention": false`, such as the Jev plugin's `not_for_me` for a
+`/test-e2e` command, keeps a comment from being new.
 
 ## Priority (derive.Score)
 

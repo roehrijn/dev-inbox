@@ -114,16 +114,19 @@ on `internal/api` contracts and NATS; registers as NATS micro service `devinbox-
 
 ### Flow
 
-1. Start: `inbox.list` → viewer and PRs. Sweep foreign open PRs.
+1. Start: `inbox.list` → viewer and PRs. Sweep foreign open PRs and my open non-draft PRs.
 2. Durable consumer `jev` with `FilterSubjects` for `comment_added`, `review_submitted`,
    `commits_pushed`, `review_requested`, `discovered`, `reopened` (never `annotated`: no feedback
    loop). Debounce per PR (2s).
 3. Per PR: `pr.get` → candidates = comments by someone else, not a bot, after my last activity, in a
    thread I started or replied in, mentioning me, or top-level on a PR with a review request or
-   review from me. Comments that already carry `jev.intent` are not reclassified.
+   review from me. On my own PRs: the core's new comments (`derive.NewComments`, which still
+   includes greylisted logins). Comments that already carry `jev.intent` are not reclassified.
 4. One batched Jev call per PR (one Choice per candidate); write `jev.intent` per comment, adding
    `"attention": false` for `ack` and `not_for_me`.
-5. Write `jev.attention` with score and reasons, or delete it (`null`) when nothing is needed.
+5. Foreign PRs only: write `jev.attention` with score and reasons, or delete it (`null`) when
+   nothing is needed. On my own PRs the comment annotations are the whole result: `"attention":
+   false` keeps a comment out of the core's `new comments` reason.
 
 ### Intents
 

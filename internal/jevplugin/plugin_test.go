@@ -559,6 +559,45 @@ func TestSweepClassifiesCandidates(t *testing.T) {
 	}
 }
 
+func TestSweepClassifiesNewCommentsOnOwnPRs(t *testing.T) {
+	own := foreignItem(keyAPI,
+		issue("before-push", "alice", 2, "Can you add a test?"),
+		issue("mine", me, 3, "Done."),
+		issue("command", "alice", 5, "/test-e2e managementv1 --repeat 3"),
+		issue("bot", "github-actions[bot]", 6, "E2E tests started."),
+	)
+	own.PR.Author = me
+	own.PR.ReviewRequests = nil
+	own.PR.LastPushAt = at(4)
+	own.Classification = model.Classification{Section: model.SectionNeedsAction, Reasons: []string{"new comments"}}
+	draft := foreignItem(keyWeb, issue("draft-comment", "alice", 5, "Is this ready?"))
+	draft.PR.Author = me
+	draft.Classification = model.Classification{Section: model.SectionDrafts}
+	h := newHarness(t, own, draft)
+	h.jev.setAnswers(map[string]answer{"command": {IntentNotForMe, 0.9}})
+
+	h.start(t, nil)
+	eventually(t, "the sweep", func() bool { return h.sweeps() == 1 })
+
+	reqs := h.jev.seen()
+	if len(reqs) != 1 {
+		t.Fatalf("got %d Jev requests, want 1", len(reqs))
+	}
+	if got := slices.Collect(maps.Keys(reqs[0].Questions)); !reflect.DeepEqual(got, []string{"command"}) {
+		t.Fatalf("classified comments %v, want command", got)
+	}
+	a, ok := h.daemon.annotation(keyAPI, "command", KeyIntent)
+	if !ok {
+		t.Fatalf("comment command has no %s annotation", KeyIntent)
+	}
+	if v := decodeValue(t, a); v["intent"] != IntentNotForMe || v[derive.AnnotationAttention] != false {
+		t.Errorf("comment command: value %v, want not_for_me without attention", v)
+	}
+	if _, ok := h.daemon.annotation(keyAPI, "", KeyAttention); ok {
+		t.Errorf("own PR got a %s annotation", KeyAttention)
+	}
+}
+
 func TestIntentContributions(t *testing.T) {
 	tests := []struct {
 		name        string

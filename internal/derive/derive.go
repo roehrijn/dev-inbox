@@ -13,8 +13,8 @@ import (
 )
 
 // Classify assigns a PR to an inbox section for viewer. Closed and merged PRs get SectionNone.
-// Comments of greylisted logins are not new.
-func Classify(pr model.PR, viewer model.Viewer, greylist []string) model.Classification {
+// Comments of greylisted logins and comments quieted by an annotation (see quietComments) are not new.
+func Classify(pr model.PR, viewer model.Viewer, greylist []string, annotations []model.Annotation) model.Classification {
 	if pr.State != model.PRStateOpen {
 		return model.Classification{}
 	}
@@ -33,7 +33,7 @@ func Classify(pr model.PR, viewer model.Viewer, greylist []string) model.Classif
 	if pr.IsDraft {
 		return model.Classification{Section: model.SectionDrafts}
 	}
-	if reasons := needsActionReasons(pr, viewer, greylist); len(reasons) > 0 {
+	if reasons := needsActionReasons(pr, viewer, greylist, quietComments(annotations)); len(reasons) > 0 {
 		return model.Classification{Section: model.SectionNeedsAction, Reasons: reasons}
 	}
 	if readyToMerge(pr) {
@@ -42,7 +42,7 @@ func Classify(pr model.PR, viewer model.Viewer, greylist []string) model.Classif
 	return model.Classification{Section: model.SectionWaitingForReview}
 }
 
-func needsActionReasons(pr model.PR, viewer model.Viewer, greylist []string) []string {
+func needsActionReasons(pr model.PR, viewer model.Viewer, greylist []string, quiet map[string]bool) []string {
 	var reasons []string
 	if pr.Checks == model.ChecksFailure {
 		reasons = append(reasons, "checks failing")
@@ -53,7 +53,9 @@ func needsActionReasons(pr model.PR, viewer model.Viewer, greylist []string) []s
 	if pr.Mergeable == "CONFLICTING" {
 		reasons = append(reasons, "merge conflict")
 	}
-	if hasNewComments(pr, viewer, greylist) {
+	if slices.ContainsFunc(NewComments(pr, viewer), func(c model.Comment) bool {
+		return !greylisted(c.Author, greylist) && !quiet[c.ID]
+	}) {
 		reasons = append(reasons, "new comments")
 	}
 	return reasons
@@ -76,17 +78,21 @@ func readyToMerge(pr model.PR) bool {
 	return false
 }
 
-// hasNewComments reports whether someone other than the viewer, a bot or a greylisted login
-// commented after the viewer's last activity. A push counts as activity: it is the viewer's answer
-// to earlier comments.
-func hasNewComments(pr model.PR, viewer model.Viewer, greylist []string) bool {
+// NewComments returns the comments of pr, in pr's order, that someone other than the viewer or a bot
+// wrote after the viewer's last activity. A push counts as activity: it is the viewer's answer to
+// earlier comments.
+func NewComments(pr model.PR, viewer model.Viewer) []model.Comment {
 	last := LastActivity(pr, viewer)
 	if pr.LastPushAt.After(last) {
 		last = pr.LastPushAt
 	}
-	return slices.ContainsFunc(pr.Comments, func(c model.Comment) bool {
-		return !isViewer(c.Author, viewer) && !isBot(c.Author) && !greylisted(c.Author, greylist) && c.CreatedAt.After(last)
-	})
+	var out []model.Comment
+	for _, c := range pr.Comments {
+		if !isViewer(c.Author, viewer) && !isBot(c.Author) && c.CreatedAt.After(last) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func isViewer(login string, viewer model.Viewer) bool {
@@ -166,7 +172,7 @@ const TeamReviewMaxAge = 14 * 24 * time.Hour
 // Annotation value fields with a meaning to derive. A PR-level annotation contributes AnnotationScore
 // and AnnotationAttention only while it is newer than the viewer's last activity; a comment-level
 // annotation with AnnotationAttention set to false excludes that comment from the thread-reply and
-// mention signals.
+// mention signals and from the new comments of the viewer's own PRs.
 const (
 	AnnotationScore     = "score"
 	AnnotationAttention = "attention"
@@ -415,7 +421,7 @@ func isWordByte(b byte) bool {
 }
 
 // quietComments returns the IDs of the comments that a comment-level annotation excludes from the
-// thread-reply and mention signals by setting AnnotationAttention to false.
+// thread-reply and mention signals and from new comments by setting AnnotationAttention to false.
 func quietComments(annotations []model.Annotation) map[string]bool {
 	quiet := map[string]bool{}
 	for _, a := range annotations {
@@ -655,7 +661,7 @@ func trimBot(login string) string {
 // Evaluate classifies pr, sets its score with its terms and whether it is hidden. A foreign open PR also gets its
 // attention reasons, and NeedsMe if it has any; see attention.
 func Evaluate(pr model.PR, in Inputs) model.Classification {
-	cls := Classify(pr, in.Viewer, in.Priority.Greylist)
+	cls := Classify(pr, in.Viewer, in.Priority.Greylist, in.Annotations)
 	var extra []model.ScoreTerm
 	if cls.Section == model.SectionReviewRequested || cls.Section == model.SectionInvolved {
 		cls.Reasons, extra = attention(pr, cls.Direct, in)
@@ -737,7 +743,7 @@ func diffChanges(old, cur model.PR, in Inputs, section model.Section) []change {
 		cs = append(cs, change{model.EventDraftChanged, model.ChangeDraft{IsDraft: cur.IsDraft}})
 	}
 
-	if from := Classify(old, viewer, in.Priority.Greylist).Section; from != section {
+	if from := Classify(old, viewer, in.Priority.Greylist, in.Annotations).Section; from != section {
 		cs = append(cs, change{model.EventSectionChanged, model.ChangeSection{From: from, To: section}})
 	}
 	return cs
