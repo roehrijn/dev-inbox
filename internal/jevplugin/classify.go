@@ -54,7 +54,7 @@ var intents = []intent{
 		badge: "addressed"},
 	{name: IntentAck, description: "Only thanks or acknowledges, without asking anything.",
 		badge: "ack", suppress: true},
-	{name: IntentNotForMe, description: "Informational, or addressed to someone other than `viewer`.",
+	{name: IntentNotForMe, description: "Informational, a command to a bot such as `/retest`, or addressed to someone other than `viewer`.",
 		badge: "not for me", suppress: true},
 }
 

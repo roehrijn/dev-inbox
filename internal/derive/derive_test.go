@@ -42,9 +42,10 @@ func minePR(mut ...func(*model.PR)) model.PR {
 
 func TestClassify(t *testing.T) {
 	tests := []struct {
-		name string
-		pr   model.PR
-		want model.Classification
+		name        string
+		pr          model.PR
+		annotations []model.Annotation
+		want        model.Classification
 	}{
 		{
 			name: "merged is none",
@@ -158,6 +159,30 @@ func TestClassify(t *testing.T) {
 				pr.Comments = []model.Comment{{ID: "c1", Kind: model.CommentReview, Author: "loft-bot", CreatedAt: at(5)}}
 			}),
 			want: model.Classification{Section: model.SectionWaitingForReview},
+		},
+		{
+			name: "quieted comments are not new",
+			pr: minePR(func(pr *model.PR) {
+				pr.Comments = []model.Comment{{ID: "c1", Author: "other", Body: "/test-e2e", CreatedAt: at(5)}}
+			}),
+			annotations: []model.Annotation{
+				{CommentID: "c1", Key: "jev.intent", Value: json.RawMessage(`{"intent":"not_for_me","attention":false}`)},
+			},
+			want: model.Classification{Section: model.SectionWaitingForReview},
+		},
+		{
+			name: "a quieted comment does not hide another new one",
+			pr: minePR(func(pr *model.PR) {
+				pr.Comments = []model.Comment{
+					{ID: "c1", Author: "other", CreatedAt: at(5)},
+					{ID: "c2", Author: "other", CreatedAt: at(6)},
+				}
+			}),
+			annotations: []model.Annotation{
+				{CommentID: "c1", Key: "jev.intent", Value: json.RawMessage(`{"attention":false}`)},
+				{CommentID: "c2", Key: "jev.intent", Value: json.RawMessage(`{"intent":"unclear"}`)},
+			},
+			want: model.Classification{Section: model.SectionNeedsAction, Reasons: []string{"new comments"}},
 		},
 		{
 			name: "needs action lists all reasons in table order",
@@ -282,7 +307,7 @@ func TestClassify(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := Classify(tt.pr, viewer, []string{"Loft-Bot"}); !reflect.DeepEqual(got, tt.want) {
+			if got := Classify(tt.pr, viewer, []string{"Loft-Bot"}, tt.annotations); !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("Classify = %+v, want %+v", got, tt.want)
 			}
 		})
@@ -383,7 +408,7 @@ func TestClassifyNewComments(t *testing.T) {
 				pr.Comments = tt.comments
 				pr.Reviews = tt.reviews
 			})
-			if got := Classify(pr, viewer, nil).Section; got != tt.want {
+			if got := Classify(pr, viewer, nil, nil).Section; got != tt.want {
 				t.Fatalf("section = %q, want %q", got, tt.want)
 			}
 		})
@@ -945,7 +970,7 @@ func TestDiff(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Diff: %v", err)
 			}
-			wantCls := Classify(tt.cur, viewer, nil)
+			wantCls := Classify(tt.cur, viewer, nil, nil)
 			wantCls.Score = tt.score
 			if tt.attention != nil {
 				wantCls.Reasons, wantCls.NeedsMe = tt.attention, true
@@ -2868,7 +2893,7 @@ func TestHidden(t *testing.T) {
 	requested := func(pr *model.PR) { pr.ReviewRequests = []model.ReviewRequest{{Login: "viewer"}} }
 	// seen is basePR's FetchedAt, at(1).
 	hide := func(pr model.PR) []model.Annotation {
-		return []model.Annotation{HiddenAnnotation(pr, Classify(pr, viewer, nil))}
+		return []model.Annotation{HiddenAnnotation(pr, Classify(pr, viewer, nil, nil))}
 	}
 	in := Inputs{Viewer: viewer, Priority: Priority{Greylist: []string{"acme-bot"}, Weights: DefaultWeights}}
 

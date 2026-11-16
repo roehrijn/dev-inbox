@@ -437,7 +437,7 @@ See [docs/design.md](docs/design.md) for the architecture and [docs/ideas.md](do
 
 ## Jev plugin
 
-`dev-inbox-jev` is an optional plugin that reads what new comments on others' PRs want from you, using
+`dev-inbox-jev` is an optional plugin that reads what new comments on your and others' PRs want from you, using
 [TypeSafe Jev](https://docs.typesafe.ai). It runs next to `dev-inbox serve` and uses only the NATS API above:
 
 ```sh
@@ -457,6 +457,10 @@ annotation `jev.intent`. `ack` and `not_for_me` also mute the comment for the co
 nothing while the core already reports `changes since your review`. Handling a comment removes its intent from the
 result, while its `jev.intent` annotation stays. Everything the plugin added expires as soon as you act on the PR
 and is written again right away if comments you have not handled remain.
+
+On your own non-draft PRs the plugin classifies the comments behind the core's `new comments` reason. A comment
+classified as `ack` or `not_for_me`, such as a thank-you or a `/test-e2e` command for CI, no longer counts as new,
+so a PR whose only new comments are such noise leaves `Needs action`. Own PRs get no `jev.attention` annotation.
 
 Flags: `--config`, `--nats-url`, `--log-level`. The plugin reads its settings from its own file,
 `$XDG_CONFIG_HOME/dev-inbox/jev.yaml` (default `~/.config/dev-inbox/jev.yaml`), or from the path given with
