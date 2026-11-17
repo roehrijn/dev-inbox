@@ -43,13 +43,16 @@ type Client struct {
 	url    string
 	source string
 	log    *slog.Logger
+	closed chan struct{}
 }
 
 // Connect connects to url and reconnects forever, also when the daemon is not up yet. source names the
 // connection and becomes the Source of the annotations written through the client.
 func Connect(url, source string, log *slog.Logger) (*Client, error) {
+	closed := make(chan struct{})
 	nc, err := nats.Connect(url,
 		nats.Name(source),
+		nats.ClosedHandler(func(*nats.Conn) { close(closed) }),
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(time.Second),
@@ -57,12 +60,19 @@ func Connect(url, source string, log *slog.Logger) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connect to %s: %w", url, err)
 	}
-	return &Client{nc: nc, url: url, source: source, log: log}, nil
+	return &Client{nc: nc, url: url, source: source, log: log, closed: closed}, nil
 }
 
 func (c *Client) Conn() *nats.Conn { return c.nc }
 
-func (c *Client) Close() { _ = c.nc.Drain() }
+// Close drains the connection and waits until it is closed. The drain ends with a flush, so once Close
+// returns the server has dropped the client's subscriptions, including the pending pull requests of a
+// stopped JetStream consumer, which would otherwise receive events published after the plugin stopped
+// and hold them unacknowledged until their AckWait expires.
+func (c *Client) Close() {
+	_ = c.nc.Drain() // On error the connection is closed or closing already.
+	<-c.closed
+}
 
 // AwaitDaemon lists the inbox, retrying until the daemon answers or ctx ends.
 func (c *Client) AwaitDaemon(ctx context.Context) (api.ListResponse, bool) {
