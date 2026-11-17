@@ -451,6 +451,37 @@ func TestBackfillSkipsInaccessiblePRs(t *testing.T) {
 	}
 }
 
+func TestReconcileWaitsForBackfill(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// An interrupted backfill left a PR that needs the viewer stored without the marker, so a reconcile
+	// running alongside the rerun would find and refetch it.
+	pr := requestedPR(1)
+	seed(t, dir, false, pr)
+	gh := newFake(pr)
+	gh.search["involves:@me"] = []model.PRKey{pr.Key}
+	// The delay only widens the window in which a racing reconcile would show up.
+	gh.fetchHook = func(model.PRKey) { time.Sleep(50 * time.Millisecond) }
+	cfg := testConfig(dir)
+	cfg.ReconcileInterval = 10 * time.Millisecond
+
+	r := startDaemon(t, cfg, gh)
+	eventually(t, "backfill marker", func() bool { _, ok := r.meta(t, metaBackfillDone); return ok })
+	eventually(t, "reconcile", func() bool { return len(gh.callsOf("FetchStatuses")) > 0 })
+
+	gh.mu.Lock()
+	var methods []string
+	for _, c := range gh.calls {
+		if c.method == "FetchPR" || c.method == "FetchStatuses" {
+			methods = append(methods, c.method)
+		}
+	}
+	gh.mu.Unlock()
+	if methods[0] != "FetchPR" || methods[1] != "FetchStatuses" {
+		t.Errorf("calls = %q, want the backfill FetchPR before the first FetchStatuses", methods)
+	}
+}
+
 func TestNotificationTracksNewPR(t *testing.T) {
 	t.Parallel()
 	pr := requestedPR(7)
