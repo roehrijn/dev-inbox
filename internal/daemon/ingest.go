@@ -102,6 +102,7 @@ func (d *daemon) ingest(ctx context.Context, it item) error {
 // backfill discovers the open PRs involving the viewer once per state directory. The meta marker is
 // only set after every found PR was ingested, so an interrupted backfill reruns on the next start.
 func (d *daemon) backfill(ctx context.Context) {
+	defer close(d.backfilled)
 	_, done, err := d.store.Meta(ctx, metaBackfillDone)
 	if err != nil {
 		d.log.Error("read backfill marker", "err", err)
@@ -165,6 +166,7 @@ func (d *daemon) runBackfill(ctx context.Context, keys []model.PRKey) {
 		d.log.Error("write backfill marker", "err", err)
 		return
 	}
+	d.backfillRan = true
 	d.log.Info("backfill done", "prs", len(keys))
 }
 
@@ -255,7 +257,18 @@ func (d *daemon) handleNotification(ctx context.Context, n github.Notification) 
 	return nil
 }
 
+// reconcileLoop starts after the backfill. A reconcile racing it would refetch just backfilled PRs
+// that need the viewer and, by merging into their pending baseline items, emit their history. Right
+// after a backfill every PR is fresh, so the first round waits one interval.
 func (d *daemon) reconcileLoop(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-d.backfilled:
+	}
+	if d.backfillRan && !sleep(ctx, d.cfg.ReconcileInterval) {
+		return
+	}
 	for {
 		if err := d.reconcile(ctx); err != nil && ctx.Err() == nil {
 			d.log.Error("reconcile", "err", err)

@@ -105,6 +105,10 @@ type daemon struct {
 	bus   *bus.Bus
 	gate  *gate
 	queue *queue
+	// backfilled is closed once backfill has finished or found nothing to do. backfillRan, valid once
+	// backfilled is closed, tells whether it ingested PRs.
+	backfilled  chan struct{}
+	backfillRan bool
 
 	teams []string // configured preferred teams, sorted
 
@@ -167,6 +171,7 @@ func start(cfg Config, gh GitHub) (*daemon, error) {
 		teams: slices.Sorted(maps.Keys(cfg.PreferredTeams)),
 
 		teamMembers: map[string][]string{},
+		backfilled:  make(chan struct{}),
 	}
 	if err := d.loadCachedViewer(context.Background()); err != nil {
 		d.log.Warn("ignoring cached viewer", "err", err)
