@@ -968,8 +968,9 @@ func TestDurableConsumerResumes(t *testing.T) {
 	h.jev.setAnswers(map[string]answer{"reply": {IntentQuestionForMe, 0.9}})
 	h.publish(t, model.EventCommentAdded, keyAPI)
 	h.publish(t, model.EventAnnotated, keyAPI)
-	if info := h.consumer(t); info.NumPending != 1 {
-		t.Fatalf("consumer has %d pending events while stopped, want the comment only", info.NumPending)
+	if info := h.consumer(t); info.NumPending != 1 || info.NumAckPending != 0 {
+		t.Fatalf("consumer has %d pending and %d unacknowledged events while stopped, want the comment pending only",
+			info.NumPending, info.NumAckPending)
 	}
 
 	h.start(t, nil)
