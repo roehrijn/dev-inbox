@@ -29,7 +29,9 @@ break config, state or the event API; say so in the release notes. A version wit
 
 ### Cutting a release
 
-Release from the head of `main` after its CI passed, in one of two ways:
+First set `version` in [flake.nix](flake.nix) to the version without pre-release suffix (`0.3.0` for
+`v0.3.0-rc.1`) and merge that to `main`; the release fails otherwise. Then release from the head of
+`main` after its CI passed, in one of two ways:
 
 - **From GitHub**: Actions → Release → Run workflow on `main`, enter the version (`0.1.0`), or from a
   terminal:
@@ -50,7 +52,8 @@ The [release workflow](.github/workflows/release.yaml) then:
 
 1. runs the full CI on the commit;
 2. resolves the tag with [release-tag.sh](.github/scripts/release-tag.sh). For a run started from GitHub it
-   checks that the version is valid and not released yet, and tags the commit in its own checkout only;
+   checks that the version is valid and not released yet, and tags the commit in its own checkout only.
+   For both ways it checks that the version matches `flake.nix`;
 3. runs [GoReleaser](.goreleaser.yaml), which builds the four binaries for Linux and macOS on amd64 and
    arm64, packs one `dev-inbox_<version>_<os>_<arch>.tar.gz` per platform with `checksums.txt`, and
    publishes the GitHub release with notes grouped from the commit subjects. GitHub creates the tag with
