@@ -18,7 +18,7 @@
         default = pkgs.buildGo126Module rec {
           pname = "dev-inbox";
           # The release workflow refuses a tag whose version differs from this one.
-          version = "0.2.0";
+          version = "0.2.1";
           src = ./.;
           subPackages = [
             "cmd/dev-inbox"
