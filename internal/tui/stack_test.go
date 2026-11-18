@@ -109,6 +109,31 @@ func TestNestStacks(t *testing.T) {
 	}
 }
 
+func TestNeedsMeViewListsStackBases(t *testing.T) {
+	k := func(n int) model.PRKey { return prKey("o", "r", n) }
+	notMine := func(it api.InboxItem) api.InboxItem {
+		it.NeedsMe = false
+		return it
+	}
+	secs := groupItems([]api.InboxItem{
+		stackItem(k(3), "b", "c", 80),
+		notMine(stackItem(k(2), "a", "b", 40)),
+		notMine(stackItem(k(1), "main", "a", 50)),
+		notMine(stackItem(k(4), "main", "x", 30)),
+	}, false)
+	s := secs[slices.Index(displaySections, model.SectionReviewRequested)]
+	var keys []string
+	for _, it := range s.items {
+		keys = append(keys, it.PR.Key.String())
+	}
+	if want := []string{"o/r#1", "o/r#2", "o/r#3"}; !slices.Equal(keys, want) || !slices.Equal(s.depth, []int{0, 1, 2}) {
+		t.Errorf("got %v depths %v, want %v depths [0 1 2]", keys, s.depth, want)
+	}
+	if s.hidden != 1 {
+		t.Errorf("hidden = %d, want 1", s.hidden)
+	}
+}
+
 func TestViewIndentsStacks(t *testing.T) {
 	k := func(n int) model.PRKey { return prKey("o", "r", n) }
 	list := api.ListResponse{Items: []api.InboxItem{
