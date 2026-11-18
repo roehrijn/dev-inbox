@@ -563,9 +563,11 @@ func hiddenFromList(it api.InboxItem, all bool) bool {
 // comes first, then the most recently updated, and stacked PRs follow the PR they are
 // stacked on. Items without a known model section are dropped. Hidden items go to the
 // hidden section of their tab whatever the view and score; of the others, those matching
-// hiddenFromList are only counted in section.hidden.
+// hiddenFromList are only counted in section.hidden, unless a listed PR of their section
+// is stacked on them.
 func groupItems(items []api.InboxItem, all bool) []section {
 	secs := make([]section, len(displaySections))
+	filtered := make([][]api.InboxItem, len(displaySections))
 	idx := map[model.Section]int{}
 	for i, id := range displaySections {
 		secs[i].id = id
@@ -580,13 +582,16 @@ func groupItems(items []api.InboxItem, all bool) []section {
 		case it.Hidden:
 			i = idx[hiddenSections[sectionTab[it.Section]]]
 		case hiddenFromList(it, all):
-			secs[i].hidden++
+			filtered[i] = append(filtered[i], it)
 			continue
 		}
 		secs[i].items = append(secs[i].items, it)
 	}
 	for i := range secs {
 		s := &secs[i]
+		bases := stackBases(s.items, filtered[i])
+		s.items = append(s.items, bases...)
+		s.hidden = len(filtered[i]) - len(bases)
 		slices.SortStableFunc(s.items, func(x, y api.InboxItem) int {
 			if c := cmp.Compare(y.Score, x.Score); c != 0 {
 				return c
@@ -601,15 +606,44 @@ func groupItems(items []api.InboxItem, all bool) []section {
 	return secs
 }
 
+type branch struct{ owner, repo, ref string }
+
+func branchOf(k model.PRKey, ref string) branch {
+	return branch{strings.ToLower(k.Owner), strings.ToLower(k.Repo), ref}
+}
+
+// stackBases returns the items of filtered that a PR of listed is stacked on, directly or
+// through other items of filtered.
+func stackBases(listed, filtered []api.InboxItem) []api.InboxItem {
+	heads := map[branch]int{}
+	for i, it := range filtered {
+		if it.PR.HeadRef != "" {
+			heads[branchOf(it.PR.Key, it.PR.HeadRef)] = i
+		}
+	}
+	var bases []api.InboxItem
+	taken := make([]bool, len(filtered))
+	queue := slices.Clone(listed)
+	for len(queue) > 0 {
+		it := queue[0]
+		queue = queue[1:]
+		if it.PR.BaseRef == "" {
+			continue
+		}
+		if p, ok := heads[branchOf(it.PR.Key, it.PR.BaseRef)]; ok && !taken[p] {
+			taken[p] = true
+			bases = append(bases, filtered[p])
+			queue = append(queue, filtered[p])
+		}
+	}
+	return bases
+}
+
 // nestStacks moves every PR whose base branch is the head branch of another of items, in
 // the same repository, right behind that PR, keeping the order of items among siblings.
 // It returns the reordered items and the depth of each: 0 for a PR not stacked on one of
 // items, the parent's depth plus one otherwise.
 func nestStacks(items []api.InboxItem) ([]api.InboxItem, []int) {
-	type branch struct{ owner, repo, ref string }
-	branchOf := func(k model.PRKey, ref string) branch {
-		return branch{strings.ToLower(k.Owner), strings.ToLower(k.Repo), ref}
-	}
 	heads := map[branch]int{}
 	for i, it := range items {
 		if it.PR.HeadRef != "" {
